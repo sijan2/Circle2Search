@@ -1,5 +1,5 @@
 # Circle2Search
-Circle to Search for macos.
+Circle to Search for macOS.
 
 
 https://github.com/user-attachments/assets/782f97b1-7a78-4c8e-af93-17e89b42dc63
