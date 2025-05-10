@@ -8,6 +8,24 @@ import CoreVideo
 import CoreGraphics.CGGeometry
 import Combine // Needed for Task
 
+// Define this struct, perhaps globally or nested if preferred and accessible
+struct DetailedTextRegion: Identifiable, Equatable { // Identifiable if used in SwiftUI lists directly, not strictly needed here
+    let id = UUID() // For Identifiable conformance if ever needed
+    let recognizedText: VNRecognizedText // The top candidate text object from Vision
+    let screenRect: CGRect // The screen-coordinate bounding box for the entire observation
+    let normalizedRect: CGRect // The normalized bounding box for the entire observation (0,0 bottom-left)
+    // String is directly available via recognizedText.string
+
+    // Equatable conformance
+    static func == (lhs: DetailedTextRegion, rhs: DetailedTextRegion) -> Bool {
+        // For .onChange, often checking if the underlying data that drives UI has changed is enough.
+        // VNRecognizedText is a class, so direct comparison might not be what we want unless we compare its string value and box.
+        // For simplicity with .onChange, comparing IDs and normalizedRects can be a good starting point.
+        // If more detailed change detection is needed, this can be expanded.
+        return lhs.id == rhs.id && lhs.normalizedRect == rhs.normalizedRect && lhs.recognizedText.string == rhs.recognizedText.string
+    }
+}
+
 // Error specific to capture process
 enum CaptureError: Error {
     case noDisplaysFound
@@ -27,12 +45,17 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
     private var currentBackgroundImage: CGImage?
     private var stream: SCStream?
     private var continuation: CheckedContinuation<Void, Error>? // For awaiting frame
-    private var detectedTextRegions: [VNRecognizedTextObservation] = [] // Store initially detected regions
+    private var currentDetailedTextRegions: [DetailedTextRegion] = [] // Store initially detected regions
 
     // MARK: - Capture Initiation
 
     /// Checks permissions and starts the screen capture process.
     func startCapture() {
+        // ADDED: Explicitly dismiss any existing overlay from OverlayManager
+        // This helps ensure its state is clean before we check isStreamActive
+        // or try to show a new overlay later.
+        OverlayManager.shared.dismissOverlay()
+
         guard !isStreamActive else {
             print("Capture session already active.")
             return
@@ -209,15 +232,14 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
         self.previousApp = NSWorkspace.shared.frontmostApplication // Store the app active *now*
 
         // Clear regions from any previous run
-        self.detectedTextRegions = []
+        self.currentDetailedTextRegions = []
 
         // Perform initial text rectangle detection BEFORE showing overlay
         Task { [weak self] in
              guard let self = self else { return }
              await self.detectInitialTextRegions(image: cgImage)
              // Convert VNTextObservation.boundingBox to CGRect for the overlay
-             let normalizedRects = self.detectedTextRegions.map { $0.boundingBox }
-             let detectedTexts = self.detectedTextRegions.compactMap { $0.topCandidates(1).first?.string } // ADDED: Extract text strings
+             let normalizedRects = self.currentDetailedTextRegions.map { $0.normalizedRect }
 
              if let firstRect = normalizedRects.first {
                  print("CaptureController: Preparing to show overlay. Normalized rects count: \(normalizedRects.count).")
@@ -228,18 +250,14 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
              // Ensure this is called on the main thread as it involves UI
              DispatchQueue.main.async {
                  OverlayManager.shared.showOverlay(
-                     backgroundImage: self.currentBackgroundImage, // self.currentBackgroundImage is cgImage
-                     detectedTextRects: normalizedRects,
-                     detectedTexts: detectedTexts, // ADDED: Pass detected texts
+                     backgroundImage: self.currentBackgroundImage,
+                     detailedTextRegions: self.currentDetailedTextRegions,
                      previousApp: self.previousApp,
-                     completion: { [weak self] selectedPath, selectedIndices in // UPDATED: Completion signature
-                     // For now, handlePathSelection only takes Path. We can adapt it later if needed.
-                     // Or, if handlePathSelection doesn't need selectedIndices, we just don't pass them.
-                     // Let's assume handlePathSelection will be updated or this is just a placeholder for compilation.
-                     Task { [weak self] in 
-                         print("CaptureController: Overlay completion: Path: \(selectedPath != nil), Indices: \(String(describing: selectedIndices))")
-                         await self?.handlePathSelection(selectedPath) // Current handlePathSelection only takes Path?
-                     }
+                     completion: { [weak self] selectedPath, finalBrushedText in // Expecting String now
+                         Task { [weak self] in 
+//                             print("CaptureController: Overlay completion: Path: \\(selectedPath != nil), Brushed Text: \\(finalBrushedText ?? "nil")")
+                             await self?.handleSelectionCompletion(selectedPath, brushedText: finalBrushedText)
+                         }
                  }
              ) 
          }
@@ -264,89 +282,91 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
     // MARK: - Path Handling & Analysis (Existing Code)
 
     // This function is called when the user finishes drawing a path or cancels.
-    private func handlePathSelection(_ selectedPath: Path?) async { // Changed name to avoid conflict
-        guard let path = selectedPath, let fullImage = self.currentBackgroundImage else {
-            print("Handling path selection: Path or fullImage is nil, activating previous app.")
-            activatePreviousApp()
-            self.currentBackgroundImage = nil // Clear stored image
-            self.detectedTextRegions = [] // Clear detected text regions
-            print("Cleared currentBackgroundImage and detectedTextRegions due to nil path.")
+    private func handleSelectionCompletion(_ selectedPath: Path?, brushedText: String?) async {
+        if let text = brushedText, !text.isEmpty {
+            print("Handling selection based on brushed text: '\\(text)'")
+            ResultPanel.shared.presentGoogleQuery(text)
+            // No need to crop or re-recognize if OverlayView provides exact text.
             return
         }
 
-        print("Handling path selection...")
+        // Fallback to path-based selection if no brushedText, but a path exists
+        if let path = selectedPath, let fullImage = self.currentBackgroundImage {
+            print("Handling selection based on drawn path (no brushed text provided).")
+            await processPathBasedSelection(path, fullImage: fullImage) // processPathBasedSelection may need to be updated if it relies on indices
+            return
+        }
 
-        // --- Coordinate System Conversion (CRITICAL TODO) ---
-        // We need to convert the path's bounding box from the Overlay's coordinate
-        // system (likely screen points or normalized screen coords, top-left origin)
-        // to the Image's normalized coordinate system (0-1, bottom-left origin)
-        // used by Vision's boundingBox. This is non-trivial.
-        // Placeholder: Using path.boundingRect directly is INCORRECT but allows compilation.
-        let pathBoundsInOverlayCoords = path.boundingRect
+        print("Handling selection: No brushed text and no valid path, or fullImage is nil.")
+        if self.currentBackgroundImage == nil {
+             activatePreviousApp()
+        }
+    }
+
+    // Helper function for the original path-based selection logic
+    private func processPathBasedSelection(_ path: Path, fullImage: CGImage) async {
+        print("Processing path-based selection logic...")
+        let pathBoundsInOverlayCoords = path.boundingRect // These are in overlay's coordinate space
         let imageWidth = CGFloat(fullImage.width)
         let imageHeight = CGFloat(fullImage.height)
 
-        // **Placeholder Conversion** - Assumes pathBounds are relative to image size already
-        // and just needs flipping Y axis. This is likely WRONG.
-        let normalizedPathBoundingBox = CGRect(
-            x: pathBoundsInOverlayCoords.origin.x / imageWidth,
-            y: (imageHeight - pathBoundsInOverlayCoords.origin.y - pathBoundsInOverlayCoords.height) / imageHeight, // Flip Y
-            width: pathBoundsInOverlayCoords.width / imageWidth,
-            height: pathBoundsInOverlayCoords.height / imageHeight
-        ).standardized // Ensure positive width/height
-        print("Normalized Path BBox (placeholder): \(normalizedPathBoundingBox)")
-        // --- End Coordinate System Conversion ---
+        // Placeholder Conversion for path bounds - This needs to be accurate for Vision.
+        // Assuming pathBoundsInOverlayCoords are relative to the overlay size which matches screen.
+        // Vision expects normalized (0-1) with (0,0) at bottom-left of the image.
+        // The OverlayView's path is likely top-left origin based on screen points.
+        // This conversion will need careful review based on OverlayView's coordinate system.
+        // For now, let's assume path.boundingRect is already somewhat representative of the *area* on the image.
+        
+        // We need pixel coordinates for cropping. If pathBoundsInOverlayCoords are screen points:
+        let cropRectForPath = pathBoundsInOverlayCoords // This IS LIKELY WRONG if path is not in image pixels.
+                                                      // For robust solution, path from OverlayView needs to be in normalized image coords or pixels.
+        
+        print("Path BBox in Overlay Coords (used as crop placeholder): \(cropRectForPath)")
 
-        // Check for intersection with pre-detected regions
-        var didIntersectWithTextRegion = false
-        if !detectedTextRegions.isEmpty {
-            for region in detectedTextRegions {
-                // VNTextObservation.boundingBox is already normalized (0,0 bottom-left)
-                if normalizedPathBoundingBox.intersects(region.boundingBox) {
-                    print("Selected path intersects with a detected text region: \(region.boundingBox)")
-                    didIntersectWithTextRegion = true
-                    break // Found an intersection
-                }
-            }
-            if !didIntersectWithTextRegion {
-                 print("Selected path did NOT intersect with any detected text regions.")
-            }
-        } else {
-            print("No pre-detected text regions were found or stored.")
-        }
 
-        // Crop the image based on the selected path
-        // TODO: Ensure cropImage uses the correct coordinate system for cropping!
-        // It likely needs the path bounding box in *pixel* coordinates of the image.
-        // Using pathBoundsInOverlayCoords as placeholder for pixel coords.
-        guard let croppedImage = cropImage(fullImage, pathBoundsInPixelCoords: pathBoundsInOverlayCoords /* Pass appropriate rect */) else {
-            print("Failed to crop image.")
-            activatePreviousApp()
-            self.currentBackgroundImage = nil
+        guard let croppedImage = cropImage(fullImage, pathBoundsInPixelCoords: cropRectForPath) else {
+            print("Failed to crop image using path bounds.")
+            // If overlay is meant to stay, don't activate previous app here directly
+            // activatePreviousApp() 
+            // self.currentBackgroundImage = nil // Don't clear if overlay stays
+            ResultPanel.shared.presentGoogleQuery("Error: Could not crop selection.")
             return
         }
 
-        // Decide whether to run detailed text recognition or fallback
-        if didIntersectWithTextRegion {
-            print("Path intersected text region, performing detailed text recognition...")
-            // Pass the cropped image and potentially the original path/bounds for context
-            await recognizeText(in: croppedImage) // Assuming recognizeText takes CGImage
-        } else {
-            print("Path did NOT intersect text regions (or no regions detected), falling back to Google Lens.")
-            fallbackToGoogleLens(image: croppedImage) // Assuming fallback takes CGImage
+        // For path-based, we don't have pre-confirmed text, so always run full recognition.
+        // The didIntersectWithTextRegion logic can be a hint, but selectedIndices method is more direct.
+        
+        // Let's simplify: if we are in path-based, we try to recognize text from the crop.
+        // The 'didIntersectWithTextRegion' check can be less critical if selectedIndices handles direct text hits.
+        var didIntersectWithTextRegion = false
+        let normalizedPathBoundingBox = CGRect( // For intersection check with Vision regions
+            x: cropRectForPath.origin.x / imageWidth,
+            y: (imageHeight - cropRectForPath.origin.y - cropRectForPath.height) / imageHeight, // Flip Y for Vision
+            width: cropRectForPath.width / imageWidth,
+            height: cropRectForPath.height / imageHeight
+        ).standardized
+        
+        if !currentDetailedTextRegions.isEmpty {
+            for region in currentDetailedTextRegions {
+                if normalizedPathBoundingBox.intersects(region.normalizedRect) {
+                    print("Selected path (for fallback check) intersects with a detected text region: \(region.normalizedRect)")
+                    didIntersectWithTextRegion = true
+                    break
+                }
+            }
         }
 
-        // Clear the stored image after processing is complete or fallback initiated
-        self.currentBackgroundImage = nil
-        print("Cleared currentBackgroundImage in CaptureController after processing.")
-        self.detectedTextRegions = []
-        print("Cleared detectedTextRegions in CaptureController after processing.")
-        
-        // 4. Cleanup UI
-        DispatchQueue.main.async { [weak self] in
-            OverlayManager.shared.dismissOverlay()
-            self?.activatePreviousApp()
+        if didIntersectWithTextRegion {
+            print("Path intersected (fallback check), performing detailed text recognition...")
+            await recognizeText(in: croppedImage, directlyRecognizedText: nil)
+        } else {
+            print("Path did NOT intersect (fallback check) or no regions, falling back to Google Lens.")
+            fallbackToGoogleLens(image: croppedImage)
         }
+        // State (bg image, regions) should not be cleared here if overlay persists.
+        // self.currentBackgroundImage = nil
+        // self.currentDetailedTextRegions = []
+        // Cleanup UI (activatePreviousApp) is also removed from here.
     }
 
     // Helper function stub for cropping - needs refinement
@@ -374,28 +394,38 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
     /// Performs initial, fast detection of text regions on the full image.
     private func detectInitialTextRegions(image: CGImage) async {
         print("Starting initial text region detection...")
-        self.detectedTextRegions = [] // Clear previous results
+        self.currentDetailedTextRegions = [] // Clear previous results
 
         let request = VNRecognizeTextRequest { [weak self] request, error in
             guard let strongSelf = self else { return } // Safely unwrap self
 
-            // Log raw results from Vision first
-            // print("Vision Request Results: \(String(describing: request.results)), Error: \(String(describing: error))")
-
             let anyResults = request.results
-            // print("Vision completion: anyResults = \(String(describing: anyResults))")
 
             if let concreteObservations = anyResults as? [VNRecognizedTextObservation] {
-                // print("Vision completion: Successfully cast to [VNRecognizedTextObservation]. Count: \(concreteObservations.count)")
-                if concreteObservations.isEmpty {
-                    // print("Vision completion: concreteObservations IS EMPTY after cast.")
-                    strongSelf.detectedTextRegions = [] // Clear if empty
-                } else {
-                    // print("Vision completion: concreteObservations IS NOT EMPTY. Count: \(concreteObservations.count). Processing them.")
-                    strongSelf.detectedTextRegions = concreteObservations
+                var newDetailedRegions: [DetailedTextRegion] = []
+                for observation in concreteObservations {
+                    if let topCandidate = observation.topCandidates(1).first {
+                        // We need to calculate screenRect here if it's not already done for this observation
+                        // Assuming self.currentBackgroundImage is available for dimensions
+                        // This part depends on where normalizedRects were previously calculated. 
+                        // Let's assume we have a helper or do it inline for now.
+                        // The normalizedRect IS observation.boundingBox
+                        // The screenRect needs to be calculated based on overlay/canvas size AFTER overlay is shown.
+                        // For now, we will pass the observation and its normalizedRect.
+                        // OverlayView will be responsible for calculating screenRect for its canvas size.
+                        newDetailedRegions.append(DetailedTextRegion(
+                            recognizedText: topCandidate,
+                            screenRect: .zero, // Placeholder, will be calculated in OverlayView based on its size
+                            normalizedRect: observation.boundingBox
+                        ))
+                    }
                 }
+                strongSelf.currentDetailedTextRegions = newDetailedRegions // New property in CaptureController
+
+                // ---- REMOVE EXPLORATORY LOGGING or keep if still needed for debug ----
+                
             } else {
-                // print("Vision completion: FAILED to cast anyResults to [VNRecognizedTextObservation].")
+                strongSelf.currentDetailedTextRegions = []
                 if anyResults == nil {
                     print("Vision completion: anyResults was nil.")
                 } else {
@@ -406,7 +436,6 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
                         print("Vision completion: anyResults was non-empty, but elements are not VNRecognizedTextObservation. Type of first element: \(type(of: innerArray.first!))")
                     }
                 }
-                strongSelf.detectedTextRegions = [] // Clear on failure
             }
             return
         }
@@ -429,60 +458,64 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
     // MARK: - Text Recognition
 
     /// Performs detailed text recognition on the cropped image and presents results.
-    private func recognizeText(in croppedImage: CGImage) async {
+    private func recognizeText(in croppedImage: CGImage, directlyRecognizedText: String?) async {
         print("Performing detailed text recognition on cropped image...")
+
+        if let directText = directlyRecognizedText, !directText.isEmpty {
+            print("Using directly recognized text: '\\(directText)'")
+            Task { @MainActor in // Ensure UI updates on main thread
+                ResultPanel.shared.presentGoogleQuery(directText)
+                // Do NOT activate previous app here, overlay should stay focused with panel
+            }
+            return // Skip Vision request if we have direct text
+        }
+
+        print("No direct text provided or empty, proceeding with Vision recognition...")
         let request = VNRecognizeTextRequest { [weak self] request, error in
             guard let observations = request.results as? [VNRecognizedTextObservation], error == nil else {
-                print("Error during text recognition or no observations: \(error?.localizedDescription ?? "No details")")
-                // Even if recognition fails, cleanup
-                DispatchQueue.main.async {
-                     OverlayManager.shared.dismissOverlay()
-                     self?.activatePreviousApp()
+//                print("Error during Vision text recognition or no observations: \\(error?.localizedDescription ?? "No details")")
+                Task { @MainActor in // Ensure UI updates on main thread
+                    ResultPanel.shared.presentGoogleQuery("Vision Error: Could not recognize text.")
+                    // OverlayManager.shared.dismissOverlay() // <-- REMOVED: Do not dismiss
+                    // self?.activatePreviousApp() // <-- REMOVED: Do not activate previous app
                 }
                 return
             }
             
             let recognizedStrings = observations.compactMap { observation in
-                // Return the string of the top VNRecognizedText instance.
                 observation.topCandidates(1).first?.string
             }
             
             if recognizedStrings.isEmpty {
-                print("Detailed text recognition found no text.")
-                 DispatchQueue.main.async {
-                     OverlayManager.shared.dismissOverlay()
-                     self?.activatePreviousApp()
-                 }
+                print("Vision detailed text recognition found no text.")
+                Task { @MainActor in // Ensure UI updates on main thread
+                    ResultPanel.shared.presentGoogleQuery("No text found in the selected area.")
+                    // OverlayManager.shared.dismissOverlay() // <-- REMOVED: Do not dismiss
+                    // self?.activatePreviousApp() // <-- REMOVED: Do not activate previous app
+                }
             } else {
                 let queryString = recognizedStrings.joined(separator: " ")
-                print("Recognized text: \(queryString)")
-                // TODO: Potentially use HighlighterLayer here if needed, passing observations
-                // Requires careful coordinate handling (relative to cropped or original?)
-                
-                // Present results (assuming ResultPanel handles its own display logic)
-                Task { @MainActor [weak self] in
-                    // Dismiss overlay slightly before or concurrently with showing panel
-                    OverlayManager.shared.dismissOverlay()
+                print("Vision recognized text: \\(queryString)")
+                Task { @MainActor in // Ensure UI updates on main thread
+                    // OverlayManager.shared.dismissOverlay() // <-- REMOVED THIS (already done in previous step, but ensure it's gone)
                     ResultPanel.shared.presentGoogleQuery(queryString)
-                    self?.activatePreviousApp() // Activate previous app after panel interaction starts
+                    // self?.activatePreviousApp() // <-- REMOVED (already done in previous step, ensure gone)
                 }
             }
         }
         
-        // Configure the request (e.g., recognition level, language)
-        request.recognitionLevel = VNRequestTextRecognitionLevel.accurate // Or .fast
-        // request.recognitionLanguages = ["en-US"] // Optional: Specify languages
+        request.recognitionLevel = VNRequestTextRecognitionLevel.accurate
         
         let handler = VNImageRequestHandler(cgImage: croppedImage, options: [:])
         do {
             try handler.perform([request])
-            print("Detailed text recognition request performed.")
+            print("Detailed text recognition request performed (Vision).")
         } catch {
-            print("Failed to perform detailed text recognition: \(error)")
-            // Cleanup on handler error
-            DispatchQueue.main.async { [weak self] in
-                 OverlayManager.shared.dismissOverlay()
-                 self?.activatePreviousApp()
+            print("Failed to perform detailed text recognition (Vision handler): \\(error)")
+            Task { @MainActor in // Ensure UI updates on main thread
+                ResultPanel.shared.presentGoogleQuery("Error processing image for text recognition.")
+                 // OverlayManager.shared.dismissOverlay() // <-- REMOVED: Do not dismiss
+                 // self?.activatePreviousApp() // <-- REMOVED: Do not activate previous app
             }
         }
     }
@@ -550,8 +583,12 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
         
         // 4. Cleanup UI
         DispatchQueue.main.async { [weak self] in
-            OverlayManager.shared.dismissOverlay()
-            self?.activatePreviousApp()
+            // OverlayManager.shared.dismissOverlay() // <-- REMOVED THIS
+            self?.activatePreviousApp() // Still activate previous app if it's a fallback that opens a browser page.
+                                        // User can re-trigger overlay. This might need further thought
+                                        // depending on desired UX for fallback.
+                                        // For now, keeping activatePreviousApp as it's a distinct action (Lens)
+                                        // not an update to the existing panel.
         }
     }
 

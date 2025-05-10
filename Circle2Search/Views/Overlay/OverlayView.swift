@@ -1,17 +1,32 @@
 import SwiftUI
 import MetalKit // <-- Import MetalKit
+import Vision // Ensure Vision is imported for VNRecognizedText
 
 struct OverlayView: View {
+    // Define SelectableWord and SelectionHandle at the top of OverlayView struct
+    struct SelectableWord: Identifiable, Equatable {
+        let id = UUID()
+        let text: String
+        let screenRect: CGRect       
+        let normalizedRect: CGRect   // Original normalized rect from Vision for this word/segment
+        let globalIndex: Int         // Unique index in the flattened list of all words
+        let sourceRegionIndex: Int   // Index of the parent DetailedTextRegion
+        let sourceWordSwiftRange: Range<String.Index> // Range within the source region's full string
+    }
+    enum SelectionHandle { case start, end, none }
+
     @ObservedObject var overlayManager: OverlayManager // Inject the manager
     var backgroundImage: CGImage?
-    let detectedTextRects: [CGRect]? // <-- Add this property
+    let detailedTextRegions: [DetailedTextRegion]? // MODIFIED: To accept DetailedTextRegion
     @State private var path = Path()
     @State private var drawingPoints: [CGPoint] = [] // Keep track for potential analysis/smoothing
+    @State private var brushedSelectedText: String = "" // NEW: For the precise brushed text
+    @State private var activeSelectionWordRects: [CGRect] = [] // RENAMED: For clarity, as it will now store word/segment bounding boxes
     @State private var selectedTextIndices: Set<Int> = [] // <-- ADDED: To track selected text
     @State private var hoveredTextIndex: Int? = nil // NEW: For hover effect
     @State private var showSearchButton = false // For confirming drag selection
     @Binding var showOverlay: Bool // Use binding to allow dismissal from here
-    var completion: (Path?, Set<Int>?) -> Void // Path is nil if cancelled, added Set<Int> for selected text indices
+    var completion: (Path?, String?) -> Void // Path is nil if cancelled, added String? for the brushed text
 
     // Environment to detect Dark Mode
     @Environment(\.colorScheme) var colorScheme
@@ -69,205 +84,129 @@ struct OverlayView: View {
     // Add new state variables for selection handles
     @State private var selectionStartHandle: CGPoint?
     @State private var selectionEndHandle: CGPoint?
-    @State private var isDraggingHandle: Bool = false
-    @State private var draggedHandle: SelectionHandle = .none
+    @State private var isDraggingHandle: Bool = false // True if a selection handle is being dragged
+    @State private var draggedHandleType: SelectionHandle = .none // Which handle is being dragged
     @State private var selectedTextRange: TextSelectionRange?
     
+    // State for handle-based selection refinement
+    @State private var isHandleSelectionActive: Bool = false
+    @State private var startHandleWordGlobalIndex: Int? // Global index in allSelectableWords
+    @State private var endHandleWordGlobalIndex: Int?   // Global index in allSelectableWords
+    // Screen rects for drawing the start and end handles accurately
+    @State private var currentSelectionStartHandleRect: CGRect? 
+    @State private var currentSelectionEndHandleRect: CGRect?  
+    // All words forming the current selection controlled by handles
+    @State private var currentHandleSelectionRects: [CGRect] = [] 
+    @State private var textForCurrentHandleSelection: String = ""
+
+    // Processed list of all words with their properties
+    @State private var allSelectableWords: [SelectableWord] = []
+
     // ADDED: Struct for text selection range to conform to Equatable
     struct TextSelectionRange: Equatable {
         var start: Int
         var end: Int
     }
     
-    enum SelectionHandle {
-        case start
-        case end
-        case none
+    // Extracted Drawing Canvas Layer
+    private var drawingCanvasLayer: some View {
+        GeometryReader { canvasGeometryProxy in 
+            Canvas { context, size in 
+                if isHandleSelectionActive {
+                    if !currentHandleSelectionRects.isEmpty {
+                        let overallSelectionRect = currentHandleSelectionRects.reduce(CGRect.null, { $0.union($1) })
+                        if !overallSelectionRect.isNull {
+                            var selectionPath = Path()
+                            selectionPath.addRect(overallSelectionRect)
+                            context.fill(selectionPath, with: .color(.blue.opacity(0.3)))
+                            context.stroke(selectionPath, with: .color(.blue.opacity(0.6)), lineWidth: 1)
+                        }
+                    }
+                    if let startRect = currentSelectionStartHandleRect {
+                        drawSelectionHandle(at: CGPoint(x: startRect.minX, y: startRect.midY), context: context)
+                    }
+                    if let endRect = currentSelectionEndHandleRect {
+                        drawSelectionHandle(at: CGPoint(x: endRect.maxX, y: endRect.midY), context: context)
+                    }
+                } else if isDragging { 
+                    for wordRect in activeSelectionWordRects {
+                        var rectPath = Path()
+                        rectPath.addRect(wordRect)
+                        context.fill(rectPath, with: .color(.blue.opacity(0.4)))
+                    }
+                }
+                
+                if !path.isEmpty {
+                    let timelineDate = startDate // Use the startDate for consistency if timeline isn't directly passed
+                    let currentTime = Date().timeIntervalSince(timelineDate) // Or pass timeline.date
+                    let pulseFrequency: Double = 1.8
+                    let minOpacity: Double = 0.2
+                    let maxOpacity: Double = 0.9
+                    let pulse = (sin(currentTime * 2 * .pi * pulseFrequency) + 1) / 2
+                    let animatedGlowOpacity = minOpacity + (maxOpacity - minOpacity) * pulse
+                    let glowPath = path.strokedPath(StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+                    context.addFilter(.blur(radius: 3))
+                    context.stroke(glowPath, with: .color(.cyan.opacity(animatedGlowOpacity)), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+                    let gradient = Gradient(colors: [.cyan.opacity(0.8), .blue.opacity(0.6), .purple.opacity(0.4)])
+                    context.stroke(path, with: .linearGradient(gradient, startPoint: .zero, endPoint: CGPoint(x: size.width, y: size.height)), 
+                                style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+                    if let lastPoint = lastDrawingPoint {
+                        let tipSize: CGFloat = 12.0
+                        let animatedTipOpacity = 0.6 + 0.4 * pulse 
+                        let tipPath = Path(ellipseIn: CGRect(x: lastPoint.x - tipSize/2, y: lastPoint.y - tipSize/2, width: tipSize, height: tipSize))
+                        context.addFilter(.blur(radius: 2))
+                        context.fill(tipPath, with: .color(.cyan.opacity(animatedTipOpacity)))
+                    }
+                }
+            }
+            .gesture(dragGesture(canvasSize: canvasGeometryProxy.size))
+            .gesture(handleDragGesture(canvasSize: canvasGeometryProxy.size))
+            .onContinuousHover { phase in 
+                switch phase {
+                case .active(let location):
+                    updateHoveredTextIndex(at: location, in: canvasGeometryProxy.size) 
+                case .ended:
+                    hoveredTextIndex = nil
+                }
+            }
+            .gesture( 
+                TapGesture()
+                    .onEnded { _ in
+                        if let tappedGlobalIndex = hoveredTextIndex, tappedGlobalIndex < allSelectableWords.count {
+                            let tappedWord = allSelectableWords[tappedGlobalIndex]
+                            self.brushedSelectedText = tappedWord.text
+                            self.activeSelectionWordRects = [tappedWord.screenRect] // For confirmSelection
+                            print("Tapped on word: \(tappedWord.text)")
+                            confirmSelection() // This will set up handle selection for the single tapped word
+                        }
+                    }
+            )
+            .onChange(of: detailedTextRegions) { _, newRegions in
+                processSelectableWords(canvasProxySize: canvasGeometryProxy.size)
+            }
+            .onChange(of: canvasGeometryProxy.size) { _, newSize in
+                processSelectableWords(canvasProxySize: newSize)
+            }
+            .onAppear {
+                processSelectableWords(canvasProxySize: canvasGeometryProxy.size)
+            }
+            .edgesIgnoringSafeArea(.all)
+        }
     }
 
     var body: some View {
-        // Use TimelineView to drive the animation at ~60fps
         TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !overlayManager.isWindowActuallyVisible)) { timeline in
-            // Calculate elapsed time for shaders
-//            let time = Float(timeline.date.timeIntervalSince(startDate))
-
             ZStack {
-                // --- Metal Bloom Effect (Layer 1: Background) ---
-                // MOVED TO TOP FOR DEBUGGING
-                /*
-                GeometryReader { geometry in
-                    MetalBloomView(
-                        isActuallyVisible: overlayManager.isWindowActuallyVisible,
-                        // time: .constant(time), // Pass the calculated time
-                        isDarkMode: colorScheme == .dark,
-                        noiseConfig: noiseUniforms,
-                        spotlightConfig: spotlightUniforms,
-                        isPausedBinding: $overlayManager.shouldPauseMetalRendering // <-- ADDED THIS
-                    )
-                    .edgesIgnoringSafeArea(.all) // Ensure it fills the view
-                    .allowsHitTesting(false) // Don't block gestures for layers above
-                }
-                */
-
-                // Detect Escape key press anywhere in the overlay
-                Color.clear // Occupy space to attach shortcut
-                    .keyboardShortcut(.escape, modifiers: [])
-                    .onTapGesture { /* Optional: Define action if needed */ }
-                    .allowsHitTesting(false) // Don't interfere with drawing
-
-                // --- Background Image (Layer 2) ---
+                Color.clear.keyboardShortcut(.escape, modifiers: []).allowsHitTesting(false)
                 if let bgImage = backgroundImage {
-                    Image(decorative: bgImage, scale: 1.0)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill) // Or .fit depending on desired look
-                        .edgesIgnoringSafeArea(.all)
-                        .allowsHitTesting(false) // Don't block gestures
+                    Image(decorative: bgImage, scale: 1.0).resizable().aspectRatio(contentMode: .fill).edgesIgnoringSafeArea(.all).allowsHitTesting(false)
                 } else {
-                    // Fallback if image loading fails, still allows bloom to show
-                    Color.black.opacity(0.01)
-                        .edgesIgnoringSafeArea(.all)
-                        .allowsHitTesting(false)
+                    Color.black.opacity(0.01).edgesIgnoringSafeArea(.all).allowsHitTesting(false)
                 }
 
-                // --- Drawing Canvas & Overlay (Layer 3) ---
-                GeometryReader { canvasGeometryProxy in // NEW: GeometryReader for Canvas
-                    Canvas { context, size in // Updated: Canvas now uses canvasGeometryProxy internally
-                        // Log received data and canvas size
-                        // print("OverlayView Canvas: Received detectedTextRects count: \(detectedTextRects?.count ?? 0)")
-                        // print("OverlayView Canvas: Canvas size: \(canvasGeometryProxy.size)")
+                drawingCanvasLayer // Use the extracted layer
 
-                        // --- Draw Detected Text Rectangles (for debugging) ---
-                        if let rects = detectedTextRects {
-                            // print("OverlayView Canvas: Drawing \(rects.count) detected text rectangles.")
-                            for (index, normalizedRect) in rects.enumerated() {
-                                // Convert normalized rect to screen coordinates
-                                let screenRect = CGRect(
-                                    x: normalizedRect.origin.x * canvasGeometryProxy.size.width,
-                                    y: (1 - normalizedRect.origin.y - normalizedRect.height) * canvasGeometryProxy.size.height, // Adjust Y for SwiftUI coords
-                                    width: normalizedRect.width * canvasGeometryProxy.size.width,
-                                    height: normalizedRect.height * canvasGeometryProxy.size.height
-                                )
-                                // print("  OverlayView Canvas: Drawing rect \(index) at screenRect: \(screenRect) from normalizedRect: \(normalizedRect)")
-                                
-                                // Create a path for the rectangle and fill it
-                                var rectPath = Path()
-                                rectPath.addRect(screenRect)
-                                // context.fill(rectPath, with: .color(.yellow.opacity(0.3))) // REMOVED: Yellow debug highlight
-
-                                // Draw blue highlight if this text is selected
-                                if selectedTextIndices.contains(index) {
-                                    context.fill(rectPath, with: .color(.blue.opacity(0.4))) // NEW: Blue selection highlight
-                                    // Add a subtle glow effect for selected text
-                                    context.addFilter(.shadow(color: .blue.opacity(0.3), radius: 2))
-                                    context.stroke(rectPath, with: .color(.blue.opacity(0.6)), lineWidth: 1)
-                                }
-                            }
-                        }
-                        // --- End Debug Drawing ---
-                        
-                        if !path.isEmpty {
-                            // Calculate time for animation from the TimelineView's date
-                            let currentTime = timeline.date.timeIntervalSince(startDate)
-
-                            // Pulsing effect parameters - ADJUSTED FOR MORE NOTICEABLE EFFECT
-                            let pulseFrequency: Double = 1.8 // Slightly faster frequency
-                            let minOpacity: Double = 0.2   // Lower minimum opacity
-                            let maxOpacity: Double = 0.9   // Higher maximum opacity
-                            
-                            // Calculate current opacity based on a sine wave
-                            let pulse = (sin(currentTime * 2 * .pi * pulseFrequency) + 1) / 2 // Normalizes sine to 0-1 range
-                            let animatedGlowOpacity = minOpacity + (maxOpacity - minOpacity) * pulse
-
-                            // Draw the magical glow effect with animated opacity
-                            let glowPath = path.strokedPath(StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-                            context.addFilter(.blur(radius: 3)) // Keep blur constant or animate it too
-                            context.stroke(glowPath, with: .color(.cyan.opacity(animatedGlowOpacity)), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-                            
-                            // Draw the main stroke with gradient
-                            let gradient = Gradient(colors: [
-                                .cyan.opacity(0.8),
-                                .blue.opacity(0.6),
-                                .purple.opacity(0.4)
-                            ])
-                            context.stroke(path, with: .linearGradient(gradient, startPoint: .zero, endPoint: CGPoint(x: size.width, y: size.height)), 
-                                        style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
-                            
-                            // Draw the glowing tip at the end of the path
-                            if let lastPoint = lastDrawingPoint {
-                                let tipSize: CGFloat = 12.0
-                                let animatedTipOpacity = 0.6 + 0.4 * pulse // Link tip opacity to pulse
-                                let tipPath = Path(ellipseIn: CGRect(x: lastPoint.x - tipSize/2, 
-                                                                    y: lastPoint.y - tipSize/2, 
-                                                                    width: tipSize, 
-                                                                    height: tipSize))
-                                context.addFilter(.blur(radius: 2))
-                                context.fill(tipPath, with: .color(.cyan.opacity(animatedTipOpacity)))
-                            }
-                        }
-
-                        // Draw selected text with native-like selection
-                        if let rects = detectedTextRects, let range = selectedTextRange {
-                            // Draw selection background
-                            for index in range.start...range.end {
-                                if index < rects.count {
-                                    let normalizedRect = rects[index]
-                                    let screenRect = CGRect(
-                                        x: normalizedRect.origin.x * canvasGeometryProxy.size.width,
-                                        y: (1 - normalizedRect.origin.y - normalizedRect.height) * canvasGeometryProxy.size.height,
-                                        width: normalizedRect.width * canvasGeometryProxy.size.width,
-                                        height: normalizedRect.height * canvasGeometryProxy.size.height
-                                    )
-                                    
-                                    // Draw selection background
-                                    let selectionPath = Path(roundedRect: screenRect, cornerRadius: 2)
-                                    context.fill(selectionPath, with: .color(.blue.opacity(0.3)))
-                                    
-                                    // Draw selection handles if this is the start or end text
-                                    if index == range.start {
-                                        drawSelectionHandle(at: CGPoint(x: screenRect.minX, y: screenRect.midY), context: context)
-                                    }
-                                    if index == range.end {
-                                        drawSelectionHandle(at: CGPoint(x: screenRect.maxX, y: screenRect.midY), context: context)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .gesture(dragGesture(canvasSize: canvasGeometryProxy.size))
-                    .gesture(handleDragGesture(canvasSize: canvasGeometryProxy.size))
-                    .onContinuousHover { phase in // NEW: Handle hover
-                        switch phase {
-                        case .active(let location):
-                            updateHoveredTextIndex(at: location, in: canvasGeometryProxy.size) // UPDATED to use canvasGeometryProxy
-                        case .ended:
-                            hoveredTextIndex = nil
-                        }
-                    }
-                    .gesture( // NEW: Handle tap for single text box selection
-                        TapGesture()
-                            .onEnded { _ in
-                                if let tappedIndex = hoveredTextIndex {
-                                    print("Tapped on text box index: \(tappedIndex)")
-                                    selectedTextIndices = [tappedIndex] // Select only this one
-                                    confirmSelection() // And immediately search
-                                }
-                            }
-                    )
-                    // ADDED: .onAppear and .onChange to manage handle state updates
-                    .onAppear {
-                        updateAndStoreHandlePositions(currentSelectionRange: selectedTextRange, canvasSize: canvasGeometryProxy.size)
-                    }
-                    .onChange(of: selectedTextRange) { _, newRange in
-                        updateAndStoreHandlePositions(currentSelectionRange: newRange, canvasSize: canvasGeometryProxy.size)
-                    }
-                    .edgesIgnoringSafeArea(.all)
-                } // END: GeometryReader for Canvas
-
-                // --- UI Elements (Layer 4 - Optional) ---
-                // Remove the VStack with the Search Selection button entirely
-
-                // --- Metal Bloom Effect (MOVED TO TOP FOR DEBUGGING) ---
-                GeometryReader { geometry in
+                GeometryReader { geometry in 
                     MetalBloomView(
                         isActuallyVisible: overlayManager.isWindowActuallyVisible,
                         isDarkMode: colorScheme == .dark,
@@ -275,38 +214,26 @@ struct OverlayView: View {
                         spotlightConfig: spotlightUniforms,
                         isPausedBinding: $overlayManager.shouldPauseMetalRendering
                     )
-                    .edgesIgnoringSafeArea(.all)
-                    .allowsHitTesting(false)
+                    .edgesIgnoringSafeArea(.all).allowsHitTesting(false)
                 }
-
             }
-            // Apply ESC key listener to the ZStack or TimelineView
             .onAppear {
-                print("OverlayView: .onAppear called. Setting up monitors.")
-                // Initial setup when view appears
                 setupEscapeKeyMonitor()
-                isViewFocused = true // <-- Attempt to claim focus
+                isViewFocused = true 
             }
             .onDisappear {
                 removeEscapeKeyMonitor()
             }
-            .onChange(of: showOverlay) { oldValue, newValue in
-                // We only care when the overlay is *shown* (newValue is true)
+            .onChange(of: showOverlay) { _, newValue in
                 if newValue == true {
-                    // Reset state when shown
-                    print("OverlayView state reset on show.")
-                    path = Path()
-                    drawingPoints = []
-                    selectedTextIndices = [] // <-- ADDED: Clear previous selections
-                    isDragging = false
-                    startDate = Date() // Reset animation timer
+                    resetAllSelectionStates() 
+                    startDate = Date() 
                 }
             }
-
-        } // End TimelineView
-        .focusable(true) // <-- Make the ZStack focusable
-        .edgesIgnoringSafeArea(.all) // Ensure TimelineView fills screen
-        .background(TransparentWindowView()) // Necessary for click-through if window is shaped
+        }
+        .focusable(true)
+        .edgesIgnoringSafeArea(.all)
+        .background(TransparentWindowView())
     }
 
     // Separate function for ESC key monitoring setup
@@ -340,117 +267,215 @@ struct OverlayView: View {
     func dragGesture(canvasSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .local)
             .onChanged { value in
-                if !isDragging && !isDraggingHandle {
-                    path = Path()
-                    drawingPoints = []
-                    selectedTextIndices = []
-                    selectedTextRange = nil
-                    selectionStartHandle = nil
-                    selectionEndHandle = nil
-                    path.move(to: value.startLocation)
-                    drawingPoints.append(value.startLocation)
-                    isDragging = true
-                    
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        glowOpacity = 1.0
-                        glowScale = 1.2
+                // If a handle is already being dragged, don't start a new brush stroke
+                if self.isDraggingHandle { return }
+
+                // If handles are active, check if this drag started on a handle
+                if self.isHandleSelectionActive {
+                    let handleTouchRadius: CGFloat = 20 // Same as in handleDragGesture
+                    if let startRect = self.currentSelectionStartHandleRect {
+                        let handleCenter = CGPoint(x: startRect.minX, y: startRect.midY)
+                        if distance(value.startLocation, handleCenter) < handleTouchRadius {
+                            // This drag is likely for the start handle, let handleDragGesture take it
+                            return 
+                        }
+                    }
+                    if let endRect = self.currentSelectionEndHandleRect {
+                        let handleCenter = CGPoint(x: endRect.maxX, y: endRect.midY)
+                        if distance(value.startLocation, handleCenter) < handleTouchRadius {
+                            // This drag is likely for the end handle, let handleDragGesture take it
+                            return
+                        }
                     }
                 }
-                
-                if isDragging {
-                    path.addLine(to: value.location)
-                    drawingPoints.append(value.location)
-                    lastDrawingPoint = value.location
-                    
-                    // Update text selection
-                    updateTextSelection(at: value.location, canvasSize: canvasSize)
+
+                // If not dragging a handle and no handle was targeted by this drag's start:
+                if !isDragging { // Start of a new brush stroke
+                    resetAllSelectionStates() // This will set isHandleSelectionActive = false
+                    isDragging = true
+                    path.move(to: value.startLocation)
+                    drawingPoints.append(value.startLocation) 
                 }
+                path.addLine(to: value.location)
+                drawingPoints.append(value.location) 
+                lastDrawingPoint = value.location
+                updateBrushedTextSelection(drawnPath: self.path, canvasProxySize: canvasSize)
             }
             .onEnded { value in
-                if path.boundingRect.width < 10 && path.boundingRect.height < 10 {
-                    cancelSelection()
-                } else {
-                    // Finalize selection
-                    if let range = selectedTextRange {
-                        selectedTextIndices = Set(range.start...range.end)
-                        confirmSelection() // <-- This triggers the search and hides the brush
-                    }
+                if self.isDraggingHandle { 
+                    isDragging = false 
+                    return
+                }
+                isDragging = false
+                updateBrushedTextSelection(drawnPath: self.path, canvasProxySize: canvasSize) 
+                if !brushedSelectedText.isEmpty {
+                    confirmSelection() 
+                } else { 
+                    self.path = Path()
+                    self.drawingPoints = []
+                    self.activeSelectionWordRects = []
                 }
             }
     }
 
-    // Helper function to update selected text indices with improved intersection logic
-    func updateSelectedTextIndices(drawnPath: Path, canvasSize: CGSize) {
-        guard let rects = detectedTextRects else { return }
-        
-        // Create a buffer zone around the drawn path for better selection
-        let bufferWidth: CGFloat = 5.0
-        let bufferedPath = drawnPath.strokedPath(StrokeStyle(lineWidth: bufferWidth, lineCap: .round, lineJoin: .round))
-        
-        // Convert SwiftUI Path to CGPath for intersection testing
-        let cgPath = bufferedPath.cgPath
-        
-        // Create a new set for this update
-        var newSelectedIndices = Set<Int>()
-        
-        for (index, normalizedRect) in rects.enumerated() {
-            // Convert normalized rect to screen coordinates
-            let textScreenRect = CGRect(
-                x: normalizedRect.origin.x * canvasSize.width,
-                y: (1 - normalizedRect.origin.y - normalizedRect.height) * canvasSize.height,
-                width: normalizedRect.width * canvasSize.width,
-                height: normalizedRect.height * canvasSize.height
-            )
+    // NEW: Function for fine-grained text selection
+    func updateBrushedTextSelection(drawnPath: Path, canvasProxySize: CGSize) {
+        guard let regions = detailedTextRegions, !drawnPath.isEmpty else {
+            if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
+            if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
+            return
+        }
+
+        let brushPathBoundingBox = drawnPath.strokedPath(StrokeStyle(lineWidth: 15.0, lineCap: .round, lineJoin: .round)).cgPath.boundingBox
+        var newBrushedText = ""
+        var newWordRects: [CGRect] = []
+        var needsSpace = false
+
+        for region in regions {
+            let recognizedTextObject = region.recognizedText
+            let fullString = recognizedTextObject.string
             
-            // Check if the paths intersect using CGPath's contains method
-            if cgPath.contains(textScreenRect.origin) || 
-               cgPath.contains(CGPoint(x: textScreenRect.maxX, y: textScreenRect.maxY)) ||
-               cgPath.contains(CGPoint(x: textScreenRect.minX, y: textScreenRect.maxY)) ||
-               cgPath.contains(CGPoint(x: textScreenRect.maxX, y: textScreenRect.minY)) {
-                newSelectedIndices.insert(index)
+            let blockScreenRect = CGRect(
+                x: region.normalizedRect.origin.x * canvasProxySize.width,
+                y: (1 - region.normalizedRect.origin.y - region.normalizedRect.height) * canvasProxySize.height,
+                width: region.normalizedRect.width * canvasProxySize.width,
+                height: region.normalizedRect.height * canvasProxySize.height
+            )
+
+            if !brushPathBoundingBox.intersects(blockScreenRect) {
+                continue
             }
+
+            var blockTextSelected = false
+            fullString.enumerateSubstrings(in: fullString.startIndex..<fullString.endIndex, options: .byWords) { (wordSubstring, wordSwiftRange, enclosingRange, stop) in
+                guard let word = wordSubstring else { return }
+                let wordNSRange = NSRange(wordSwiftRange, in: fullString) 
+                
+                do {
+                    if let wordObservation = try recognizedTextObject.boundingBox(for: wordSwiftRange) { 
+                        let wordNormalizedBox = wordObservation.boundingBox
+                        let wordScreenRect = CGRect(
+                            x: wordNormalizedBox.origin.x * canvasProxySize.width,
+                            y: (1 - wordNormalizedBox.origin.y - wordNormalizedBox.height) * canvasProxySize.height,
+                            width: wordNormalizedBox.width * canvasProxySize.width,
+                            height: wordNormalizedBox.height * canvasProxySize.height
+                        )
+                        
+                        if brushPathBoundingBox.intersects(wordScreenRect) {
+                            if needsSpace && !newBrushedText.isEmpty && !newBrushedText.hasSuffix(" ") {
+                                newBrushedText.append(" ")
+                            }
+                            newBrushedText.append(word)
+                            newWordRects.append(wordScreenRect)
+                            blockTextSelected = true
+                            needsSpace = true 
+                        }
+                    }
+                } catch {
+                    // print("Error getting bounding box for word '\(word)': \(error)")
+                }
+            }
+            if blockTextSelected {
+                needsSpace = true 
+            } 
         }
         
-        // Update the selected indices
-        selectedTextIndices = newSelectedIndices
+        if self.brushedSelectedText != newBrushedText {
+            self.brushedSelectedText = newBrushedText
+        }
+        if self.activeSelectionWordRects != newWordRects {
+            self.activeSelectionWordRects = newWordRects
+        }
     }
 
     // Called when the user confirms the selection (e.g., clicks the button)
     func confirmSelection() {
-        isDragging = false // Hide brush
-        path = Path() // Clear the brush
-        completion(path, selectedTextIndices) // Pass the completed path and selected text indices back
-        showOverlay = false // Dismiss the overlay
+        let textToSend = isHandleSelectionActive ? textForCurrentHandleSelection : brushedSelectedText
+        completion(self.path, textToSend.isEmpty ? nil : textToSend)
+        
+        if !textToSend.isEmpty {
+            isHandleSelectionActive = true
+            // Set up for handle interaction
+            textForCurrentHandleSelection = textToSend // Text selected by brush OR handles
+            
+            // activeSelectionWordRects is from the LAST brush stroke or tap
+            // currentHandleSelectionRects should become these if transitioning from brush
+            if !isDraggingHandle { // Only update from brush if not already in handle drag
+                 currentHandleSelectionRects = activeSelectionWordRects
+            }
+
+            if !currentHandleSelectionRects.isEmpty {
+                currentSelectionStartHandleRect = currentHandleSelectionRects.first
+                currentSelectionEndHandleRect = currentHandleSelectionRects.last
+                
+                // Correctly get globalIndex
+                if let firstRect = currentSelectionStartHandleRect,
+                   let startIndexInAllWords = allSelectableWords.firstIndex(where: { $0.screenRect == firstRect }) {
+                    startHandleWordGlobalIndex = allSelectableWords[startIndexInAllWords].globalIndex
+                } else {
+                    startHandleWordGlobalIndex = nil
+                }
+                
+                if let lastRect = currentSelectionEndHandleRect,
+                   let endIndexInAllWords = allSelectableWords.firstIndex(where: { $0.screenRect == lastRect }) {
+                    endHandleWordGlobalIndex = allSelectableWords[endIndexInAllWords].globalIndex
+                } else {
+                    endHandleWordGlobalIndex = nil
+                }
+
+            } else { // Should not happen if textToSend is not empty from brush
+                isHandleSelectionActive = false 
+            }
+            
+            // Clear brush-specific states
+            self.path = Path()
+            self.drawingPoints = []
+            // activeSelectionWordRects are now stored in currentHandleSelectionRects or were used
+            
+            print("OverlayView: Confirmed. Handle selection active. Text: '\(self.textForCurrentHandleSelection)'")
+        } else {
+            isHandleSelectionActive = false
+            resetAllSelectionStates() 
+            print("OverlayView: Confirmed. No text to activate handles.")
+        }
     }
 
     // Enhanced cancel function to also hide highlights/panel
     // Called when the user cancels (e.g., presses ESC or makes tiny drag)
     func cancelSelection() {
-        print("Selection Cancelled")
-        isDragging = false
-        path = Path() // Clear the path visually
-        drawingPoints = []
-        selectedTextIndices = [] // <-- ADDED: Clear previous selections
-
-        // Hide UI elements managed by other controllers
+        resetAllSelectionStates()
         HighlighterLayer.hide()
-        // Use MainActor because ResultPanel manipulates UI
-        Task { @MainActor in 
-            ResultPanel.shared.hide()
-        }
-        
-        completion(nil, nil) // Indicate cancellation
-        showOverlay = false // Dismiss the overlay
+        Task { @MainActor in ResultPanel.shared.hide() }
+        completion(nil, nil)
+        showOverlay = false
+        print("OverlayView: Selection Cancelled & Reset.")
+    }
+
+    private func resetAllSelectionStates() {
+        isDragging = false
+        path = Path()
+        drawingPoints = []
+        brushedSelectedText = ""
+        activeSelectionWordRects = []
+        isHandleSelectionActive = false
+        startHandleWordGlobalIndex = nil
+        endHandleWordGlobalIndex = nil
+        currentSelectionStartHandleRect = nil
+        currentSelectionEndHandleRect = nil
+        currentHandleSelectionRects = []
+        textForCurrentHandleSelection = ""
+        selectedTextIndices = [] // Ensure this is also reset if it was used by tap
+        hoveredTextIndex = nil
     }
 
     private func updateHoveredTextIndex(at location: CGPoint, in size: CGSize) {
-        if let rects = detectedTextRects {
-            for (index, rect) in rects.enumerated() {
+        if let rects = detailedTextRegions {
+            for (index, region) in rects.enumerated() {
                 let denormalizedRect = CGRect(
-                    x: rect.origin.x * size.width,
-                    y: (1 - rect.origin.y - rect.height) * size.height, // Adjust for bottom-left origin
-                    width: rect.width * size.width,
-                    height: rect.height * size.height
+                    x: region.normalizedRect.origin.x * size.width,
+                    y: (1 - region.normalizedRect.origin.y - region.normalizedRect.height) * size.height, // Adjust for bottom-left origin
+                    width: region.normalizedRect.width * size.width,
+                    height: region.normalizedRect.height * size.height
                 )
                 if denormalizedRect.contains(location) {
                     hoveredTextIndex = index
@@ -482,81 +507,147 @@ struct OverlayView: View {
     // Handle drag gesture for selection handles
     // MODIFIED: Changed from var to func to accept canvasSize
     private func handleDragGesture(canvasSize: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
-                if !isDraggingHandle {
-                    // Determine which handle is being dragged
-                    if let startHandle = selectionStartHandle,
-                       distance(value.startLocation, startHandle) < 20 {
-                        draggedHandle = .start
-                        isDraggingHandle = true
-                    } else if let endHandle = selectionEndHandle,
-                              distance(value.startLocation, endHandle) < 20 {
-                        draggedHandle = .end
-                        isDraggingHandle = true
+                guard self.isHandleSelectionActive else { return } // Only care if handles are supposed to be active
+                // if self.isDragging { return } // This might be too restrictive if dragGesture starts first briefly
+
+                let handleTouchRadius: CGFloat = 20 
+                if !self.isDraggingHandle { // Try to initiate a handle drag
+                    if let startRect = self.currentSelectionStartHandleRect {
+                        let handleCenter = CGPoint(x: startRect.minX, y: startRect.midY)
+                        if distance(value.startLocation, handleCenter) < handleTouchRadius {
+                            self.isDraggingHandle = true
+                            self.draggedHandleType = .start
+                            self.isDragging = false // Explicitly stop brush dragging mode
+                            self.path = Path() 
+                            self.drawingPoints = []
+                            print("HandleDrag: Started dragging START handle")
+                            // No need to call updateSelectionViaHandleDrag here yet, wait for actual movement
+                            return // Successfully started handle drag
+                        }
                     }
+                    if let endRect = self.currentSelectionEndHandleRect {
+                        let handleCenter = CGPoint(x: endRect.maxX, y: endRect.midY)
+                        if distance(value.startLocation, handleCenter) < handleTouchRadius {
+                            self.isDraggingHandle = true
+                            self.draggedHandleType = .end
+                            self.isDragging = false // Explicitly stop brush dragging mode
+                            self.path = Path()
+                            self.drawingPoints = []
+                            print("HandleDrag: Started dragging END handle")
+                            return // Successfully started handle drag
+                        }
+                    }
+                    // If no handle was hit by startLocation, this drag is not for a handle
+                    if !self.isDraggingHandle { return } 
                 }
                 
-                if isDraggingHandle {
-                    // Update selection based on handle drag
-                    updateSelectionForHandleDrag(at: value.location, canvasSize: canvasSize)
+                // This will only be reached if isDraggingHandle was true from start or became true above
+                if self.isDraggingHandle {
+                    self.updateSelectionViaHandleDrag(newLocation: value.location, 
+                                                      draggedHandle: self.draggedHandleType, 
+                                                      canvasSize: canvasSize)
                 }
             }
-            .onEnded { _ in
-                isDraggingHandle = false
-                draggedHandle = .none
+            .onEnded { value in
+                if self.isDraggingHandle {
+                     self.updateSelectionViaHandleDrag(newLocation: value.location, 
+                                                      draggedHandle: self.draggedHandleType, 
+                                                      canvasSize: canvasSize)
+                    if !self.textForCurrentHandleSelection.isEmpty {
+                         self.completion(nil, self.textForCurrentHandleSelection)
+                    }
+                    // else { // If selection became empty via handles, it might revert to no selection
+                    //    self.isHandleSelectionActive = false
+                    //    resetAllSelectionStates()
+                    // }
+                    self.isDraggingHandle = false
+                    self.draggedHandleType = .none
+                }
             }
     }
     
-    // Update selection based on handle drag
-    private func updateSelectionForHandleDrag(at location: CGPoint, canvasSize: CGSize) {
-        guard let rects = detectedTextRects else { return }
-        
-        // Find the text box closest to the drag location
-        var closestIndex = -1
-        var minDistance = CGFloat.infinity
-        
-        for (index, normalizedRect) in rects.enumerated() {
-            let screenRect = CGRect(
-                x: normalizedRect.origin.x * canvasSize.width,
-                y: (1 - normalizedRect.origin.y - normalizedRect.height) * canvasSize.height,
-                width: normalizedRect.width * canvasSize.width,
-                height: normalizedRect.height * canvasSize.height
-            )
-            
-            let rectCenter = CGPoint(x: screenRect.midX, y: screenRect.midY)
-            let currentDistance = distance(location, rectCenter)
-            if currentDistance < minDistance {
-                minDistance = currentDistance
-                closestIndex = index
+    private func updateSelectionViaHandleDrag(newLocation: CGPoint, draggedHandle: SelectionHandle, canvasSize: CGSize) {
+        guard isHandleSelectionActive, !allSelectableWords.isEmpty else { return }
+
+        var closestWordGlobalIndexToDragLocation: Int? = nil
+        var minDistSqToDragLocation: CGFloat = .greatestFiniteMagnitude
+
+        // Find the word whose center is closest to the current drag location
+        for word in allSelectableWords {
+            let wordCenter = CGPoint(x: word.screenRect.midX, y: word.screenRect.midY)
+            let distSq = pow(wordCenter.x - newLocation.x, 2) + pow(wordCenter.y - newLocation.y, 2)
+            if distSq < minDistSqToDragLocation {
+                minDistSqToDragLocation = distSq
+                closestWordGlobalIndexToDragLocation = word.globalIndex
             }
         }
         
-        if closestIndex >= 0 {
-            if draggedHandle == .start {
-                selectedTextRange = TextSelectionRange(start: closestIndex, end: selectedTextRange?.end ?? closestIndex)
-            } else if draggedHandle == .end {
-                selectedTextRange = TextSelectionRange(start: selectedTextRange?.start ?? closestIndex, end: closestIndex)
-            }
-            
-            // Update selected indices for highlighting
-            if let range = selectedTextRange {
-                selectedTextIndices = Set(range.start...range.end)
+        guard let targetGlobalIndexForDraggedHandle = closestWordGlobalIndexToDragLocation else { return }
+
+        var newTentativeStartGlobalIndex: Int
+        var newTentativeEndGlobalIndex: Int
+
+        if draggedHandle == .start {
+            newTentativeStartGlobalIndex = targetGlobalIndexForDraggedHandle
+            newTentativeEndGlobalIndex = self.endHandleWordGlobalIndex ?? targetGlobalIndexForDraggedHandle // Anchor to old end or target if old end is nil
+        } else { // .end or .none (though .none shouldn't happen if isDraggingHandle is true)
+            newTentativeStartGlobalIndex = self.startHandleWordGlobalIndex ?? targetGlobalIndexForDraggedHandle // Anchor to old start or target
+            newTentativeEndGlobalIndex = targetGlobalIndexForDraggedHandle
+        }
+
+        // Ensure start <= end
+        if newTentativeStartGlobalIndex > newTentativeEndGlobalIndex {
+            (newTentativeStartGlobalIndex, newTentativeEndGlobalIndex) = (newTentativeEndGlobalIndex, newTentativeStartGlobalIndex)
+        }
+        
+        // Only update if the range actually changed to avoid unnecessary redraws/calculations
+        if self.startHandleWordGlobalIndex == newTentativeStartGlobalIndex && self.endHandleWordGlobalIndex == newTentativeEndGlobalIndex {
+            return
+        }
+
+        self.startHandleWordGlobalIndex = newTentativeStartGlobalIndex
+        self.endHandleWordGlobalIndex = newTentativeEndGlobalIndex
+
+        var tempText = ""
+        var tempRects: [CGRect] = []
+        var needsSpace = false
+
+        if let startIdx = self.startHandleWordGlobalIndex, let endIdx = self.endHandleWordGlobalIndex, startIdx <= endIdx {
+            for i in startIdx...endIdx {
+                // Ensure index is within bounds of allSelectableWords
+                if i >= 0 && i < allSelectableWords.count {
+                    let word = allSelectableWords[i]
+                    if needsSpace && !tempText.isEmpty && !tempText.hasSuffix(" ") {
+                        tempText.append(" ")
+                    }
+                    tempText.append(word.text)
+                    tempRects.append(word.screenRect)
+                    needsSpace = true
+                }
             }
         }
+        
+        self.textForCurrentHandleSelection = tempText
+        self.currentHandleSelectionRects = tempRects
+        
+        // Update the visual rects for the handles themselves
+        self.currentSelectionStartHandleRect = tempRects.first
+        self.currentSelectionEndHandleRect = tempRects.last
     }
-    
+
     // Update text selection based on current drawing position
     private func updateTextSelection(at location: CGPoint, canvasSize: CGSize) {
-        guard let rects = detectedTextRects else { return }
+        guard let rects = detailedTextRegions else { return }
         
         // Find the text box under the current position
-        for (index, normalizedRect) in rects.enumerated() {
+        for (index, region) in rects.enumerated() {
             let screenRect = CGRect(
-                x: normalizedRect.origin.x * canvasSize.width,
-                y: (1 - normalizedRect.origin.y - normalizedRect.height) * canvasSize.height,
-                width: normalizedRect.width * canvasSize.width,
-                height: normalizedRect.height * canvasSize.height
+                x: region.normalizedRect.origin.x * canvasSize.width,
+                y: (1 - region.normalizedRect.origin.y - region.normalizedRect.height) * canvasSize.height,
+                width: region.normalizedRect.width * canvasSize.width,
+                height: region.normalizedRect.height * canvasSize.height
             )
             
             if screenRect.contains(location) {
@@ -575,7 +666,7 @@ struct OverlayView: View {
 
     // ADDED: New method to update handle positions
     private func updateAndStoreHandlePositions(currentSelectionRange: TextSelectionRange?, canvasSize: CGSize) {
-        guard canvasSize != .zero, let rects = self.detectedTextRects, !rects.isEmpty else {
+        guard canvasSize != .zero, let rects = self.detailedTextRegions, !rects.isEmpty else {
             if self.selectionStartHandle != nil { self.selectionStartHandle = nil }
             if self.selectionEndHandle != nil { self.selectionEndHandle = nil }
             return
@@ -589,24 +680,24 @@ struct OverlayView: View {
 
         var newStartHandle: CGPoint? = nil
         if range.start >= 0 && range.start < rects.count {
-            let normalizedStartRect = rects[range.start]
+            let region = rects[range.start]
             let startScreenRect = CGRect(
-                x: normalizedStartRect.origin.x * canvasSize.width,
-                y: (1 - normalizedStartRect.origin.y - normalizedStartRect.height) * canvasSize.height,
-                width: normalizedStartRect.width * canvasSize.width,
-                height: normalizedStartRect.height * canvasSize.height
+                x: region.normalizedRect.origin.x * canvasSize.width,
+                y: (1 - region.normalizedRect.origin.y - region.normalizedRect.height) * canvasSize.height,
+                width: region.normalizedRect.width * canvasSize.width,
+                height: region.normalizedRect.height * canvasSize.height
             )
             newStartHandle = CGPoint(x: startScreenRect.minX, y: startScreenRect.midY)
         }
 
         var newEndHandle: CGPoint? = nil
         if range.end >= 0 && range.end < rects.count {
-            let normalizedEndRect = rects[range.end]
+            let region = rects[range.end]
             let endScreenRect = CGRect(
-                x: normalizedEndRect.origin.x * canvasSize.width,
-                y: (1 - normalizedEndRect.origin.y - normalizedEndRect.height) * canvasSize.height,
-                width: normalizedEndRect.width * canvasSize.width,
-                height: normalizedEndRect.height * canvasSize.height
+                x: region.normalizedRect.origin.x * canvasSize.width,
+                y: (1 - region.normalizedRect.origin.y - region.normalizedRect.height) * canvasSize.height,
+                width: region.normalizedRect.width * canvasSize.width,
+                height: region.normalizedRect.height * canvasSize.height
             )
             newEndHandle = CGPoint(x: endScreenRect.maxX, y: endScreenRect.midY)
         }
@@ -617,6 +708,52 @@ struct OverlayView: View {
         if self.selectionEndHandle != newEndHandle {
             self.selectionEndHandle = newEndHandle
         }
+    }
+
+    func processSelectableWords(canvasProxySize: CGSize) {
+        guard let regions = detailedTextRegions, canvasProxySize.width > 0, canvasProxySize.height > 0 else {
+            self.allSelectableWords = []
+            return
+        }
+
+        var tempSelectableWords: [SelectableWord] = []
+        var currentGlobalIndex = 0
+
+        for (regionIndex, region) in regions.enumerated() {
+            let recognizedTextObject = region.recognizedText
+            let fullString = recognizedTextObject.string
+
+            fullString.enumerateSubstrings(in: fullString.startIndex..<fullString.endIndex, options: [.byWords, .substringNotRequired]) { (wordSubstring, wordSwiftRange, enclosingRange, stop) in
+                // We use wordSwiftRange to get the bounding box from Vision
+                do {
+                    if let wordObservation = try recognizedTextObject.boundingBox(for: wordSwiftRange) {
+                        let wordNormalizedBox = wordObservation.boundingBox
+                        let wordScreenRect = CGRect(
+                            x: wordNormalizedBox.origin.x * canvasProxySize.width,
+                            y: (1 - wordNormalizedBox.origin.y - wordNormalizedBox.height) * canvasProxySize.height,
+                            width: wordNormalizedBox.width * canvasProxySize.width,
+                            height: wordNormalizedBox.height * canvasProxySize.height
+                        )
+                        // Use the actual substring for the text content
+                        let actualWordText = String(fullString[wordSwiftRange])
+                        
+                        tempSelectableWords.append(SelectableWord(
+                            text: actualWordText,
+                            screenRect: wordScreenRect,
+                            normalizedRect: wordNormalizedBox,
+                            globalIndex: currentGlobalIndex,
+                            sourceRegionIndex: regionIndex,
+                            sourceWordSwiftRange: wordSwiftRange
+                        ))
+                        currentGlobalIndex += 1
+                    }
+                } catch {
+                    print("Error getting bounding box for word range \(wordSwiftRange): \(error)")
+                }
+            }
+        }
+        self.allSelectableWords = tempSelectableWords
+        // print("Processed \(self.allSelectableWords.count) selectable words.")
     }
 }
 
@@ -645,11 +782,11 @@ struct OverlayView_Previews: PreviewProvider {
         OverlayView(
             overlayManager: previewManager, // <-- Pass the dummy manager
             backgroundImage: dummyImage,
-            detectedTextRects: nil, // <-- Add new parameter for preview (can be nil or sample data)
+            detailedTextRegions: nil, // <-- Add new parameter for preview (can be nil or sample data)
             showOverlay: $previewShowOverlay // Pass the dummy binding
-        ) { selectedPath, selectedIndices in
+        ) { selectedPath, selectedText in
             if let path = selectedPath {
-                print("Preview completed with path: \(path.boundingRect), selected indices: \(String(describing: selectedIndices))")
+                print("Preview completed with path: \(path.boundingRect), selected text: \(String(describing: selectedText))")
             } else {
                 print("Preview cancelled")
             }
@@ -657,3 +794,4 @@ struct OverlayView_Previews: PreviewProvider {
         }
     }
 }
+

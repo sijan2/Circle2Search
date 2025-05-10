@@ -14,13 +14,13 @@ class OverlayManager: ObservableObject {
 
     private var overlayWindow: KeyAcceptingWindow?
     var overlayContentView: NSView? // Store the content view (internal access is default)
-    private var currentCompletion: ((Path?, Set<Int>?) -> Void)? // UPDATED: Signature to include Set<Int>?
+    private var currentCompletion: ((Path?, String?) -> Void)? // UPDATED: Signature for brushedText
     private var previousActiveApp: NSRunningApplication? // Store the app that was active before
-    private var currentDetectedTexts: [String] = [] // ADDED: To store text strings
+    private var currentDetailedRegions: [DetailedTextRegion]? // Store the detailed regions
     private var visibilityObservation: NSKeyValueObservation?
 
     // Function to show the overlay
-    func showOverlay(backgroundImage image: CGImage?, detectedTextRects: [CGRect]?, detectedTexts: [String]?, previousApp: NSRunningApplication?, completion: @escaping (Path?, Set<Int>?) -> Void) { // ADDED detectedTexts parameter
+    func showOverlay(backgroundImage image: CGImage?, detailedTextRegions: [DetailedTextRegion]?, previousApp: NSRunningApplication?, completion: @escaping (Path?, String?) -> Void) { // UPDATED signature
         guard overlayWindow == nil else {
             print("Overlay already shown.")
             // If needed, you could potentially update the image here
@@ -29,11 +29,8 @@ class OverlayManager: ObservableObject {
             return
         }
 
-        // Store the completion handler
         currentCompletion = completion
-        self.currentDetectedTexts = detectedTexts ?? [] // ADDED: Store detected texts
-
-        // Store the previous application
+        self.currentDetailedRegions = detailedTextRegions // Store detailed regions
         self.previousActiveApp = previousApp
 
         // Get screen details
@@ -59,15 +56,20 @@ class OverlayManager: ObservableObject {
         // Pass the CGImage, the binding to isOverlayVisible, and the completion handler
         // Pass self (the OverlayManager instance) as well
         let swiftUIView = OverlayView(
-            overlayManager: self, // <-- Add this
+            overlayManager: self, 
             backgroundImage: validImage,
-            detectedTextRects: detectedTextRects, // <-- Pass the new parameter
+            detailedTextRegions: self.currentDetailedRegions, // Pass detailed regions
             showOverlay: Binding(
                 get: { self.isOverlayVisible },
-                set: { self.isOverlayVisible = $0 }
+                set: { newValue in
+                    if !newValue && self.isOverlayVisible { 
+                        self.dismissOverlay()
+                    }
+                    self.isOverlayVisible = newValue
+                }
             ),
-            completion: { [weak self] path, selectedIndices in // UPDATED: Closure now accepts selectedIndices
-                self?.handleSelectionCompletion(path: path, selectedIndices: selectedIndices)
+            completion: { [weak self] path, brushedTextFromOverlay in // UPDATED: Expecting brushedText
+                self?.handleSelectionCompletion(path: path, brushedText: brushedTextFromOverlay)
             }
         )
 
@@ -149,45 +151,34 @@ class OverlayManager: ObservableObject {
     }
 
     // Internal handler called by OverlayView's completion callback
-    private func handleSelectionCompletion(path: Path?, selectedIndices: Set<Int>?) { // UPDATED: Signature to include Set<Int>?
-        print("OverlayManager handling completion. Path received: \(path != nil), Selected Indices: \(String(describing: selectedIndices))")
+    private func handleSelectionCompletion(path: Path?, brushedText: String?) { // UPDATED: Signature for brushedText
+        print("OverlayManager handling completion. Path received: \(path != nil), Brushed Text: \(brushedText ?? "nil")")
         
-        var combinedQuery = ""
-        if let indices = selectedIndices, !indices.isEmpty {
-            let selectedTexts = indices.compactMap { index -> String? in
-                guard index < self.currentDetectedTexts.count else { return nil }
-                return self.currentDetectedTexts[index]
-            }.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } // Ensure non-empty strings
-            
-            if !selectedTexts.isEmpty {
-                combinedQuery = selectedTexts.joined(separator: " ")
-                print("OverlayManager: Combined query string: '\(combinedQuery)'")
-                
-                // Call ResultPanel to present the query
-                DispatchQueue.main.async {
-                    ResultPanel.shared.presentGoogleQuery(combinedQuery)
-                }
-            } else {
-                print("OverlayManager: All selected text items were empty or whitespace.")
-            }
-        } else {
-            print("OverlayManager: No text selected or indices out of bounds.")
-        }
+        // No longer need to combine query from indices here; CaptureController gets the direct text.
+        // The `currentDetailedRegions` (previously `currentDetectedTexts`) were used for this combining step.
+        // Now, the `brushedText` is the primary piece of information from OverlayView.
         
-        // Call the original completion handler stored in currentCompletion
-        // This now passes along the selected indices as well.
-        currentCompletion?(path, selectedIndices) // UPDATED: Pass selectedIndices along
+        currentCompletion?(path, brushedText) // Pass path and brushedText along
 
-        // Clean up after handling
-        cleanUpOverlay()
+        print("OverlayManager: handleSelectionCompletion finished. Overlay remains visible for further interaction.")
     }
 
     // Public function to dismiss the overlay externally if needed
     // Also called internally when ESC is pressed or selection is done/cancelled in OverlayView
     func dismissOverlay() {
-        guard overlayWindow != nil else { return } // Prevent double-dismissal
+        guard overlayWindow != nil else { 
+            // If window is already nil, still try to hide result panel just in case it's visible orphaned.
+            Task { @MainActor in // Dispatch to main actor
+                ResultPanel.shared.hide() // Attempt to hide panel even if overlay window is already gone.
+            }
+            return 
+        }
 
         print("Dismissing overlay window...")
+        Task { @MainActor in // Dispatch to main actor
+            ResultPanel.shared.hide() // Hide the result panel when the overlay is dismissed
+        }
+
         // Animate the fade-out (optional)
          NSAnimationContext.runAnimationGroup({ context in
              context.duration = 0.15 // Short fade duration
@@ -199,9 +190,9 @@ class OverlayManager: ObservableObject {
         // If dismissal was triggered externally BEFORE completion, signal cancellation
         if currentCompletion != nil {
             print("Dismiss triggered before completion - signalling cancellation.")
-            currentCompletion?(nil, nil) // Signal cancellation
-            currentCompletion = nil // Avoid calling it again
-            self.currentDetectedTexts = [] // ADDED: Clear stored texts on early dismiss
+            currentCompletion?(nil, nil) // Signal cancellation (path nil, text nil)
+            currentCompletion = nil 
+            self.currentDetailedRegions = nil // Clear stored detailed regions
         }
     }
 
@@ -278,7 +269,7 @@ class OverlayManager: ObservableObject {
              self.overlayWindow = nil // Release reference to NSWindow
              self.overlayContentView = nil // Clear content view reference
              self.currentCompletion = nil // Clear completion handler
-             self.currentDetectedTexts = [] // ADDED: Clear stored texts
+             self.currentDetailedRegions = nil // Clear stored detailed regions
              self.isOverlayVisible = false // Ensure state reflects reality
              self.isWindowActuallyVisible = false // Ensure visibility state is also reset
             //  self.shouldPauseMetalRendering = true // Pause rendering when overlay is cleaned up

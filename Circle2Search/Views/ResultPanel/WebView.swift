@@ -9,6 +9,20 @@ public class WebViewModel: ObservableObject {
     @Published public var didFinishLoading: Bool = false
     @Published public var pageTitle: String = "Loading..." // Initialize with a default
 
+    // Static helper to create Google search URL
+    public static func googleSearchURL(for query: String, width: Int, height: Int) -> String {
+        var components = URLComponents(string: "https://www.google.com/search")
+        components?.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "gsc", value: "2"),
+            URLQueryItem(name: "cs", value: "1"), // Defaulting to dark theme (1)
+            URLQueryItem(name: "biw", value: String(width)),
+            URLQueryItem(name: "bih", value: String(height))
+        ]
+        // Fallback should also include these if possible, though less critical
+        return components?.url?.absoluteString ?? "https://www.google.com/search?q=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&gsc=2&cs=1&biw=\(width)&bih=\(height)" 
+    }
+
     public init(link: String) {
         self.link = link
     }
@@ -31,6 +45,9 @@ public struct SwiftUIWebView: NSViewRepresentable {
         webViewInstance.navigationDelegate = context.coordinator
         webViewInstance.uiDelegate = context.coordinator // Optional: if you need to handle JS alerts, etc.
         
+        // Set a custom user-agent
+        webViewInstance.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+
         // Perform the initial load only if there's a valid URL
         if let url = URL(string: viewModel.link) {
             print("SwiftUIWebView makeNSView: Loading initial URL: \(viewModel.link)")
@@ -44,16 +61,24 @@ public struct SwiftUIWebView: NSViewRepresentable {
     }
 
     public func updateNSView(_ nsView: WKWebView, context: Context) {
-        // Only attempt to load if the viewModel.link is different from the webView's current URL.
-        // This prevents re-loading if the view updates for other reasons (e.g., viewModel.isLoading changes)
-        // but the target URL is already being processed or is the same.
         guard let newTargetURL = URL(string: viewModel.link) else {
             print("SwiftUIWebView updateNSView: New target URL string is invalid: \(viewModel.link)")
-            // nsView.loadHTMLString("<html><body>Invalid URL in ViewModel</body></html>", baseURL: nil)
             return
         }
         
         let currentWebViewURL = nsView.url
+
+        // CAPTCHA/Sorry page loop prevention
+        if let currentHost = currentWebViewURL?.host, currentHost.contains("google.com"),
+           let currentPath = currentWebViewURL?.path, currentPath.contains("/sorry") {
+            // If the current page is a Google "sorry" page, and the target URL's host is also Google
+            // (implying viewModel.link is likely the original search), don't attempt to reload immediately.
+            // This helps prevent a loop if the viewModel.link hasn't changed to a new, unrelated URL.
+            if newTargetURL.host?.contains("google.com") == true {
+                 print("SwiftUIWebView updateNSView: On Google CAPTCHA page. Suppressing reload of Google target to prevent loop.")
+                 return
+            }
+        }
         
         // Condition: Load if webView has no URL yet, OR if its URL is different from the new target.
         if currentWebViewURL == nil || currentWebViewURL != newTargetURL {
