@@ -78,8 +78,8 @@ class ResultPanel: NSObject, NSWindowDelegate {
 
         // Initialize WebViewModel if it doesn't exist (first time setup)
         // Use the panel's initial width/height for the first URL generation
-        let initialWidth: CGFloat = 500 // User changed this
-        let initialHeight: CGFloat = 500
+        let initialWidth: CGFloat = 360 // User changed this
+        let initialHeight: CGFloat = 600
         self.currentPanelWidth = initialWidth   // Store for future queries if panel not resized
         self.currentPanelHeight = initialHeight // Store for future queries if panel not resized
 

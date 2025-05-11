@@ -1,15 +1,17 @@
 {
   "images" : [
     {
-      "filename" : "ios_dark_sq_na.svg",
+      "filename" : "Google Logo.svg",
       "idiom" : "universal",
       "scale" : "1x"
     },
     {
+      "filename" : "Google Logo 1.svg",
       "idiom" : "universal",
       "scale" : "2x"
     },
     {
+      "filename" : "Google Logo 2.svg",
       "idiom" : "universal",
       "scale" : "3x"
     }
