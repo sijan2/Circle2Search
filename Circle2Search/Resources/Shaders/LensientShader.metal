@@ -96,14 +96,14 @@ fragment float4 shimmer_fragment(VertexOut in [[stage_in]], constant ShimmerUnif
     float4 result = float4(0.0);
     float baseR = u.radius;
     float soft = baseR * 0.5;
-    float wiggleAmp = baseR * 0.2;
+    float wiggleAmp = baseR * 0.35; // Increased for more spread
     
     for (int i = 0; i < 8; i++) {
         float phase = float(i) * 0.785398;
-        float wiggleX = androidWiggle(t * 0.5, phase, wiggleAmp);
+        float wiggleX = androidWiggle(t * 0.5, phase, wiggleAmp); // Original speed
         float wiggleY = androidWiggle(t * 0.5, phase + 1.57, wiggleAmp);
-        float orbitAngle = phase + t * 0.15;
-        float orbitR = baseR * 0.25;
+        float orbitAngle = phase + t * 0.15; // Original speed
+        float orbitR = baseR * 0.4; // Larger orbit for more spread
         
         float2 offset = float2(cos(orbitAngle) * orbitR + wiggleX, sin(orbitAngle) * orbitR + wiggleY);
         float2 blobCenter = center + offset;

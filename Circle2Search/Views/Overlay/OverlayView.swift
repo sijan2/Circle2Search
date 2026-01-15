@@ -173,7 +173,7 @@ struct OverlayView: View {
             .onContinuousHover { phase in 
                 switch phase {
                 case .active(let location):
-                    updateHoveredTextIndex(at: location, in: canvasGeometryProxy.size) 
+                    updateHoveredTextIndex(at: location, in: canvasGeometryProxy.size)
                 case .ended:
                     hoveredTextIndex = nil
                 }

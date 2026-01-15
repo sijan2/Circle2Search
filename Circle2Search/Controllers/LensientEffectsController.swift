@@ -124,12 +124,13 @@ final class LensientEffectsController: ObservableObject {
     }
     
     private func tick() {
-        let speed: Float = 0.15
+        let opacitySpeed: Float = 0.15
+        let positionSpeed: Float = 0.02 // Very slow for natural lazy following
         
         // Lerp towards targets
-        opacity += (opacityTarget - opacity) * speed
-        centerX += (centerXTarget - centerX) * speed
-        centerY += (centerYTarget - centerY) * speed
+        opacity += (opacityTarget - opacity) * opacitySpeed
+        centerX += (centerXTarget - centerX) * positionSpeed
+        centerY += (centerYTarget - centerY) * positionSpeed
         
         // Stop if hidden and faded out
         if state == .hidden && opacity < 0.01 {
@@ -137,5 +138,12 @@ final class LensientEffectsController: ObservableObject {
             animationTimer?.invalidate()
             animationTimer = nil
         }
+    }
+    
+    // Update center target for mouse following (called from hover)
+    func updateIdleCenter(at point: CGPoint) {
+        guard state == .idle else { return }
+        centerXTarget = Float(point.x)
+        centerYTarget = Float(point.y)
     }
 }
