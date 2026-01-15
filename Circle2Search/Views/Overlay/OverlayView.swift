@@ -61,7 +61,7 @@ struct OverlayView: View {
 
     @ObservedObject var overlayManager: OverlayManager // Inject the manager
     var backgroundImage: CGImage?
-    let detailedTextRegions: [DetailedTextRegion]? // MODIFIED: To accept DetailedTextRegion
+    // detailedTextRegions now comes from overlayManager.detailedTextRegions
     @State private var path = Path()
     @State private var drawingPoints: [CGPoint] = [] // Keep track for potential analysis/smoothing
     @State private var brushedSelectedText: String = "" // NEW: For the precise brushed text
@@ -190,7 +190,7 @@ struct OverlayView: View {
                         }
                     }
             )
-            .onChange(of: detailedTextRegions) { _, newRegions in
+            .onChange(of: overlayManager.detailedTextRegions) { _, newRegions in
                 processSelectableWords(canvasProxySize: canvasGeometryProxy.size)
             }
             .onChange(of: canvasGeometryProxy.size) { _, newSize in
@@ -431,7 +431,13 @@ struct OverlayView: View {
 
     // NEW: Function for fine-grained text selection
     func updateBrushedTextSelection(drawnPath: Path, canvasProxySize: CGSize) {
-        guard let regions = detailedTextRegions, !drawnPath.isEmpty else {
+        guard !drawnPath.isEmpty else {
+            if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
+            if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
+            return
+        }
+        let regions = overlayManager.detailedTextRegions
+        guard !regions.isEmpty else {
             if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
             if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
             return
@@ -591,7 +597,8 @@ struct OverlayView: View {
     }
 
     private func updateHoveredTextIndex(at location: CGPoint, in size: CGSize) {
-        if let rects = detailedTextRegions {
+        let rects = overlayManager.detailedTextRegions
+        if !rects.isEmpty {
             for (index, region) in rects.enumerated() {
                 let denormalizedRect = CGRect(
                     x: region.normalizedRect.origin.x * size.width,
@@ -761,7 +768,8 @@ struct OverlayView: View {
 
     // Update text selection based on current drawing position
     private func updateTextSelection(at location: CGPoint, canvasSize: CGSize) {
-        guard let rects = detailedTextRegions else { return }
+        let rects = overlayManager.detailedTextRegions
+        guard !rects.isEmpty else { return }
         
         // Find the text box under the current position
         for (index, region) in rects.enumerated() {
@@ -788,7 +796,8 @@ struct OverlayView: View {
 
     // ADDED: New method to update handle positions
     private func updateAndStoreHandlePositions(currentSelectionRange: TextSelectionRange?, canvasSize: CGSize) {
-        guard canvasSize != .zero, let rects = self.detailedTextRegions, !rects.isEmpty else {
+        let rects = overlayManager.detailedTextRegions
+        guard canvasSize != .zero, !rects.isEmpty else {
             if self.selectionStartHandle != nil { self.selectionStartHandle = nil }
             if self.selectionEndHandle != nil { self.selectionEndHandle = nil }
             return
@@ -833,7 +842,12 @@ struct OverlayView: View {
     }
 
     func processSelectableWords(canvasProxySize: CGSize) {
-        guard let regions = detailedTextRegions, canvasProxySize.width > 0, canvasProxySize.height > 0 else {
+        let regions = overlayManager.detailedTextRegions
+        guard canvasProxySize.width > 0, canvasProxySize.height > 0 else {
+            self.allSelectableWords = []
+            return
+        }
+        guard !regions.isEmpty else {
             self.allSelectableWords = []
             return
         }
@@ -892,27 +906,23 @@ struct TransparentWindowView: NSViewRepresentable {
 
 // Preview Provider - Needs adjustments for Bindings
 struct OverlayView_Previews: PreviewProvider {
-    // Create a dummy state for the binding
     @State static var previewShowOverlay = true
-    // Use the singleton instance for the preview
     static var previewManager = OverlayManager.shared
 
     static var previews: some View {
-        // Provide a dummy image or nil
-        let dummyImage: CGImage? = nil // Or create a sample CGImage for preview
+        let dummyImage: CGImage? = nil
 
         OverlayView(
-            overlayManager: previewManager, // <-- Pass the dummy manager
+            overlayManager: previewManager,
             backgroundImage: dummyImage,
-            detailedTextRegions: nil, // <-- Add new parameter for preview (can be nil or sample data)
-            showOverlay: $previewShowOverlay // Pass the dummy binding
+            showOverlay: $previewShowOverlay
         ) { selectedPath, selectedText in
             if let path = selectedPath {
                 print("Preview completed with path: \(path.boundingRect), selected text: \(String(describing: selectedText))")
             } else {
                 print("Preview cancelled")
             }
-            previewShowOverlay = false // Simulate dismissal
+            previewShowOverlay = false
         }
     }
 }

@@ -10,27 +10,24 @@ class OverlayManager: ObservableObject {
     @Published var isWindowVisible: Bool = false // KVO observable
     @Published var isOverlayVisible = false
     @Published var isWindowActuallyVisible = true
-    @Published var shouldPauseMetalRendering: Bool = false // New property
+    @Published var shouldPauseMetalRendering: Bool = false
+    @Published var detailedTextRegions: [DetailedTextRegion] = [] // Published for async OCR updates
 
     private var overlayWindow: KeyAcceptingWindow?
     var overlayContentView: NSView? // Store the content view (internal access is default)
-    private var currentCompletion: ((Path?, String?) -> Void)? // UPDATED: Signature for brushedText
-    private var previousActiveApp: NSRunningApplication? // Store the app that was active before
-    private var currentDetailedRegions: [DetailedTextRegion]? // Store the detailed regions
+    private var currentCompletion: ((Path?, String?) -> Void)?
+    private var previousActiveApp: NSRunningApplication?
     private var visibilityObservation: NSKeyValueObservation?
 
     // Function to show the overlay
-    func showOverlay(backgroundImage image: CGImage?, detailedTextRegions: [DetailedTextRegion]?, previousApp: NSRunningApplication?, completion: @escaping (Path?, String?) -> Void) { // UPDATED signature
+    func showOverlay(backgroundImage image: CGImage?, previousApp: NSRunningApplication?, completion: @escaping (Path?, String?) -> Void) {
         guard overlayWindow == nil else {
             print("Overlay already shown.")
-            // If needed, you could potentially update the image here
-            // by finding the NSHostingView and updating its rootView,
-            // but that adds complexity. A simple dismiss/re-show might be easier.
             return
         }
 
         currentCompletion = completion
-        self.currentDetailedRegions = detailedTextRegions // Store detailed regions
+        self.detailedTextRegions = [] // Clear previous regions
         self.previousActiveApp = previousApp
 
         // Get screen details
@@ -47,18 +44,13 @@ class OverlayManager: ObservableObject {
              return
         }
 
-        // Set the visibility state to true BEFORE creating the view
-        // This ensures the binding passed to OverlayView starts in the correct state
         self.isOverlayVisible = true
-        self.shouldPauseMetalRendering = false // For a new overlay, ensure rendering is not paused.
+        self.shouldPauseMetalRendering = false
 
         // --- Create the SwiftUI View ---
-        // Pass the CGImage, the binding to isOverlayVisible, and the completion handler
-        // Pass self (the OverlayManager instance) as well
         let swiftUIView = OverlayView(
             overlayManager: self, 
             backgroundImage: validImage,
-            detailedTextRegions: self.currentDetailedRegions, // Pass detailed regions
             showOverlay: Binding(
                 get: { self.isOverlayVisible },
                 set: { newValue in
@@ -68,7 +60,7 @@ class OverlayManager: ObservableObject {
                     self.isOverlayVisible = newValue
                 }
             ),
-            completion: { [weak self] path, brushedTextFromOverlay in // UPDATED: Expecting brushedText
+            completion: { [weak self] path, brushedTextFromOverlay in
                 self?.handleSelectionCompletion(path: path, brushedText: brushedTextFromOverlay)
             }
         )
@@ -183,12 +175,10 @@ class OverlayManager: ObservableObject {
              self?.cleanUpOverlay()
          })
 
-        // If dismissal was triggered externally BEFORE completion, signal cancellation
         if currentCompletion != nil {
             print("Dismiss triggered before completion - signalling cancellation.")
-            currentCompletion?(nil, nil) // Signal cancellation (path nil, text nil)
+            currentCompletion?(nil, nil)
             currentCompletion = nil 
-            self.currentDetailedRegions = nil // Clear stored detailed regions
         }
     }
 
@@ -265,7 +255,7 @@ class OverlayManager: ObservableObject {
              self.overlayWindow = nil // Release reference to NSWindow
              self.overlayContentView = nil // Clear content view reference
              self.currentCompletion = nil // Clear completion handler
-             self.currentDetailedRegions = nil // Clear stored detailed regions
+             self.detailedTextRegions = [] // Clear regions
              self.isOverlayVisible = false // Ensure state reflects reality
              self.isWindowActuallyVisible = false // Ensure visibility state is also reset
             //  self.shouldPauseMetalRendering = true // Pause rendering when overlay is cleaned up

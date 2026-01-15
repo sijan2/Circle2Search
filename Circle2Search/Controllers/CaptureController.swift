@@ -108,10 +108,10 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
         }
 
         let config = SCStreamConfiguration()
-        config.width = display.width * 2
-        config.height = display.height * 2
+        config.width = display.width
+        config.height = display.height
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        config.queueDepth = 5
+        config.queueDepth = 1
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = false
 
@@ -123,7 +123,8 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
             throw CaptureError.streamCreationFailed
         }
 
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main) // Process frames on main queue for simplicity initially
+        let processingQueue = DispatchQueue(label: "com.circle2search.capture", qos: .userInitiated)
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: processingQueue)
 
         // Use a continuation to wait for the first frame
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -204,43 +205,27 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
 
         print("Successfully captured frame as CGImage.")
         self.currentBackgroundImage = cgImage
-        self.previousApp = NSWorkspace.shared.frontmostApplication // Store the app active *now*
-
-        // Clear regions from any previous run
+        self.previousApp = NSWorkspace.shared.frontmostApplication
         self.currentDetailedTextRegions = []
 
-        // Perform initial text rectangle detection BEFORE showing overlay
-        Task { [weak self] in
-             guard let self = self else { return }
-             await self.detectInitialTextRegions(image: cgImage)
-             // Convert VNTextObservation.boundingBox to CGRect for the overlay
-             let normalizedRects = self.currentDetailedTextRegions.map { $0.normalizedRect }
+        // Show overlay IMMEDIATELY - don't wait for OCR
+        NSCursor.crosshair.set()
+        OverlayManager.shared.showOverlay(
+            backgroundImage: self.currentBackgroundImage,
+            previousApp: self.previousApp,
+            completion: { [weak self] selectedPath, finalBrushedText in
+                Task { [weak self] in 
+                    await self?.handleSelectionCompletion(selectedPath, brushedText: finalBrushedText)
+                }
+            }
+        )
 
-             if let firstRect = normalizedRects.first {
-                 print("CaptureController: Preparing to show overlay. Normalized rects count: \(normalizedRects.count).")
-                 print("  First normalizedRect: \(firstRect)")
-             }
-
-             // Now show overlay after initial detection is done (or attempted)
-             // Ensure this is called on the main thread as it involves UI
-             DispatchQueue.main.async {
-                 NSCursor.crosshair.set() // Set crosshair cursor before showing overlay
-                 OverlayManager.shared.showOverlay(
-                     backgroundImage: self.currentBackgroundImage,
-                     detailedTextRegions: self.currentDetailedTextRegions,
-                     previousApp: self.previousApp,
-                     completion: { [weak self] selectedPath, finalBrushedText in // Expecting String now
-                         Task { [weak self] in 
-//                             print("CaptureController: Overlay completion: Path: \\(selectedPath != nil), Brushed Text: \\(finalBrushedText ?? "nil")")
-                             await self?.handleSelectionCompletion(selectedPath, brushedText: finalBrushedText)
-                         }
-                 }
-             ) 
-         }
-        } // ADDED: Probable missing '}' for an 'if' block or similar scope within processFrame
+        // Run OCR in background, update OverlayManager when done
+        Task.detached(priority: .userInitiated) { [weak self, cgImage] in
+            await self?.detectInitialTextRegions(image: cgImage)
+        }
  
-         // Successfully captured frame, resume continuation
-         continuation?.resume(returning: ()) // Indicate success
+        continuation?.resume(returning: ())
     }
 
     // SCStreamDelegate method: Called when the stream stops with an error
@@ -384,11 +369,10 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
 
     /// Performs initial, fast detection of text regions on the full image.
     private func detectInitialTextRegions(image: CGImage) async {
-        print("Starting initial text region detection...")
-        self.currentDetailedTextRegions = [] // Clear previous results
+        print("Starting initial text region detection (background)...")
 
         let request = VNRecognizeTextRequest { [weak self] request, error in
-            guard let strongSelf = self else { return } // Safely unwrap self
+            guard let strongSelf = self else { return }
 
             let anyResults = request.results
 
@@ -396,50 +380,33 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
                 var newDetailedRegions: [DetailedTextRegion] = []
                 for observation in concreteObservations {
                     if let topCandidate = observation.topCandidates(1).first {
-                        // We need to calculate screenRect here if it's not already done for this observation
-                        // Assuming self.currentBackgroundImage is available for dimensions
-                        // This part depends on where normalizedRects were previously calculated. 
-                        // Let's assume we have a helper or do it inline for now.
-                        // The normalizedRect IS observation.boundingBox
-                        // The screenRect needs to be calculated based on overlay/canvas size AFTER overlay is shown.
-                        // For now, we will pass the observation and its normalizedRect.
-                        // OverlayView will be responsible for calculating screenRect for its canvas size.
                         newDetailedRegions.append(DetailedTextRegion(
                             recognizedText: topCandidate,
-                            screenRect: .zero, // Placeholder, will be calculated in OverlayView based on its size
+                            screenRect: .zero,
                             normalizedRect: observation.boundingBox
                         ))
                     }
                 }
-                strongSelf.currentDetailedTextRegions = newDetailedRegions // New property in CaptureController
-
-                // ---- REMOVE EXPLORATORY LOGGING or keep if still needed for debug ----
+                strongSelf.currentDetailedTextRegions = newDetailedRegions
                 
+                // Update OverlayManager on main thread
+                Task { @MainActor in
+                    OverlayManager.shared.detailedTextRegions = newDetailedRegions
+                    print("OCR complete: \(newDetailedRegions.count) regions found")
+                }
             } else {
                 strongSelf.currentDetailedTextRegions = []
-                if anyResults == nil {
-                    print("Vision completion: anyResults was nil.")
-                } else {
-                    print("Vision completion: anyResults was not nil, but cast failed. Actual type of anyResults: \(type(of: anyResults!))")
-                    if let innerArray = anyResults, innerArray.isEmpty {
-                        print("Vision completion: anyResults was an empty array of some other type.")
-                    } else if let innerArray = anyResults, !innerArray.isEmpty {
-                        print("Vision completion: anyResults was non-empty, but elements are not VNRecognizedTextObservation. Type of first element: \(type(of: innerArray.first!))")
-                    }
+                Task { @MainActor in
+                    OverlayManager.shared.detailedTextRegions = []
                 }
             }
-            return
         }
-        // Explicitly use VNRequestTextRecognitionLevel
-        request.recognitionLevel = VNRequestTextRecognitionLevel.accurate // Changed to .accurate
-        request.usesLanguageCorrection = false // Not needed for just finding rects
-        // request.minimumTextHeight = 0.01 // Optional: try if .accurate alone doesn't work
+        request.recognitionLevel = VNRequestTextRecognitionLevel.fast
+        request.usesLanguageCorrection = false
 
         let requestHandler = VNImageRequestHandler(cgImage: image, options: [:])
         do {
             try requestHandler.perform([request])
-            // Log that the perform call has completed. 
-            // The actual results/count are logged within the request's completion handler.
             print("VNImageRequestHandler perform complete for initial text detection.")
         } catch {
             print("Failed to perform initial text detection: \(error)")
