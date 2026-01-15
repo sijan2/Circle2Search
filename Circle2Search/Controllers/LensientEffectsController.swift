@@ -36,25 +36,25 @@ final class LensientEffectsController: ObservableObject {
     private var centerXTarget: Float = 0.0
     private var centerYTarget: Float = 0.0
     
-    // Android shimmer colors from cyvu.java
+    // Shimmer colors - balanced with more blue/green/teal, less yellow
     let shimmerColors: [SIMD3<Float>] = [
-        SIMD3<Float>(0.957, 0.176, 0.149),
-        SIMD3<Float>(0.027, 0.431, 1.000),
-        SIMD3<Float>(0.043, 0.800, 0.380),
-        SIMD3<Float>(1.000, 0.698, 0.000),
-        SIMD3<Float>(0.933, 0.302, 0.278),
-        SIMD3<Float>(0.027, 0.431, 1.000),
-        SIMD3<Float>(0.043, 0.800, 0.380),
-        SIMD3<Float>(1.000, 0.698, 0.000)
+        SIMD3<Float>(0.957, 0.176, 0.149),  // Red
+        SIMD3<Float>(0.027, 0.431, 1.000),  // Blue
+        SIMD3<Float>(0.043, 0.800, 0.380),  // Green
+        SIMD3<Float>(0.000, 0.800, 0.800),  // Teal/Cyan
+        SIMD3<Float>(0.400, 0.200, 0.900),  // Purple
+        SIMD3<Float>(0.027, 0.531, 1.000),  // Light Blue
+        SIMD3<Float>(0.043, 0.900, 0.500),  // Bright Green
+        SIMD3<Float>(0.800, 0.500, 0.100)   // Soft Orange (less yellow)
     ]
     
     let baseRadius: Float = 300.0
     
     // Dynamic radius based on screen size
     var radius: Float {
-        // Use larger of width/height to ensure full coverage
+        // Large radius for full coverage like Android
         let screenDimension = max(Float(viewSize.width), Float(viewSize.height))
-        return screenDimension * 0.5  // Half the screen size for good coverage
+        return screenDimension * 0.5
     }
     
     private init() {
@@ -77,7 +77,9 @@ final class LensientEffectsController: ObservableObject {
         centerYTarget = Float(viewSize.height) * 0.5
         centerX = centerXTarget
         centerY = centerYTarget
-        opacityTarget = 1.0
+        // Instant appear - start at full opacity immediately
+        opacity = 0.6
+        opacityTarget = 0.6
         startAnimation()
     }
     

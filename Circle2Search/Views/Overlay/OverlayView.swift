@@ -1,6 +1,50 @@
 import SwiftUI
-import MetalKit // <-- Import MetalKit
-import Vision // Ensure Vision is imported for VNRecognizedText
+import MetalKit
+import Vision
+
+// MARK: - Ripple Effect Modifier
+struct RippleModifier: ViewModifier {
+    var size: CGSize
+    var elapsedTime: TimeInterval
+    var duration: TimeInterval
+
+    func body(content: Content) -> some View {
+        let shader = ShaderLibrary.Ripple(
+            .float2(size),
+            .float(elapsedTime)
+        )
+
+        content.visualEffect { view, _ in
+            view.layerEffect(
+                shader,
+                maxSampleOffset: CGSize(width: 20, height: 20),
+                isEnabled: elapsedTime < duration
+            )
+        }
+    }
+}
+
+struct RippleEffect<T: Equatable>: ViewModifier {
+    var size: CGSize
+    var trigger: T
+    var duration: TimeInterval = 1.2
+
+    func body(content: Content) -> some View {
+        content.keyframeAnimator(
+            initialValue: 0.0,
+            trigger: trigger
+        ) { view, elapsedTime in
+            view.modifier(RippleModifier(
+                size: size,
+                elapsedTime: elapsedTime,
+                duration: duration
+            ))
+        } keyframes: { _ in
+            MoveKeyframe(0.0)
+            LinearKeyframe(duration, duration: duration)
+        }
+    }
+}
 
 struct OverlayView: View {
     // Define SelectableWord and SelectionHandle at the top of OverlayView struct
@@ -27,6 +71,10 @@ struct OverlayView: View {
     @State private var showSearchButton = false // For confirming drag selection
     @Binding var showOverlay: Bool // Use binding to allow dismissal from here
     var completion: (Path?, String?) -> Void // Path is nil if cancelled, added String? for the brushed text
+    
+    // Ripple effect state
+    @State private var appearRippleTrigger: Int = 0
+    @State private var screenCenter: CGPoint = .zero
 
     // Environment to detect Dark Mode
     @Environment(\.colorScheme) var colorScheme
@@ -155,80 +203,81 @@ struct OverlayView: View {
         }
     }
 
-    // Android-style animated vignette overlay
+    // Android-style vignette: very subtle, just frames the content
+    // Android lens_gleam_default_scrim_color: #1a000000 = 10% black max
     private var vignetteOverlay: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !overlayManager.isWindowActuallyVisible)) { timeline in
-            GeometryReader { geo in
-                let time = timeline.date.timeIntervalSince(startDate)
-                // Subtle breathing animation for the vignette
-                let breathe = 0.02 * sin(time * 0.8) // Very subtle pulse
+        GeometryReader { geo in
+            Canvas { context, size in
+                let centerX = size.width / 2
+                let centerY = size.height / 2
+                let maxRadius = sqrt(centerX * centerX + centerY * centerY)
                 
-                Canvas { context, size in
-                    // Android lens_gleam_default_scrim_color: #1a000000 (10% black)
-                    // Vignette: darker at edges, clear in center
-                    let centerX = size.width / 2
-                    let centerY = size.height / 2
-                    let maxRadius = sqrt(centerX * centerX + centerY * centerY)
-                    
-                    // Create radial gradient: clear center -> dark edges
-                    let gradient = Gradient(stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .clear, location: 0.3),
-                        .init(color: .black.opacity(0.05 + breathe), location: 0.5),
-                        .init(color: .black.opacity(0.12 + breathe), location: 0.7),
-                        .init(color: .black.opacity(0.20 + breathe), location: 0.85),
-                        .init(color: .black.opacity(0.28 + breathe), location: 1.0)
-                    ])
-                    
-                    context.fill(
-                        Path(CGRect(origin: .zero, size: size)),
-                        with: .radialGradient(
-                            gradient,
-                            center: CGPoint(x: centerX, y: centerY),
-                            startRadius: 0,
-                            endRadius: maxRadius
-                        )
+                // Very subtle vignette - Android uses only ~10% at edges
+                let gradient = Gradient(stops: [
+                    .init(color: .clear, location: 0.0),
+                    .init(color: .clear, location: 0.6),
+                    .init(color: .black.opacity(0.03), location: 0.8),
+                    .init(color: .black.opacity(0.08), location: 1.0)
+                ])
+                
+                context.fill(
+                    Path(CGRect(origin: .zero, size: size)),
+                    with: .radialGradient(
+                        gradient,
+                        center: CGPoint(x: centerX, y: centerY),
+                        startRadius: 0,
+                        endRadius: maxRadius
                     )
-                }
+                )
             }
-            .edgesIgnoringSafeArea(.all)
-            .allowsHitTesting(false)
         }
+        .edgesIgnoringSafeArea(.all)
+        .allowsHitTesting(false)
     }
     
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !overlayManager.isWindowActuallyVisible)) { timeline in
-            ZStack {
-                Color.clear.keyboardShortcut(.escape, modifiers: []).allowsHitTesting(false)
-                
-                // Layer 1: Screenshot background
-                if let bgImage = backgroundImage {
-                    Image(decorative: bgImage, scale: 1.0).resizable().aspectRatio(contentMode: .fill).edgesIgnoringSafeArea(.all).allowsHitTesting(false)
-                }
-                
-                // Layer 2: Android-style vignette (dark edges, clear center)
-                vignetteOverlay
+            GeometryReader { geometry in
+                ZStack {
+                    // Layer 1: Screenshot background with ripple effect
+                    if let bgImage = backgroundImage {
+                        Image(decorative: bgImage, scale: 1.0)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .modifier(RippleEffect(
+                                size: geometry.size,
+                                trigger: appearRippleTrigger
+                            ))
+                            .edgesIgnoringSafeArea(.all)
+                            .allowsHitTesting(false)
+                    }
+                    
+                    // Layer 2: Android-style vignette (dark edges, clear center)
+                    vignetteOverlay
 
-                // Layer 3: Drawing canvas for scribble
-                drawingCanvasLayer
+                    // Layer 3: Drawing canvas for scribble
+                    drawingCanvasLayer
 
-                // Layer 4: Shimmer effect
-                GeometryReader { geometry in
+                    // Layer 4: Shimmer effect
                     LensientMetalView(
                         isPaused: $overlayManager.shouldPauseMetalRendering
                     )
                     .edgesIgnoringSafeArea(.all)
                     .allowsHitTesting(false)
-                    .onAppear {
-                        Task { @MainActor in
-                            LensientEffectsController.shared.setViewSize(geometry.size)
-                            LensientEffectsController.shared.showIdle()
-                        }
+                }
+                .onAppear {
+                    screenCenter = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                    // Trigger ripple immediately on appear
+                    appearRippleTrigger += 1
+                    Task { @MainActor in
+                        LensientEffectsController.shared.setViewSize(geometry.size)
+                        LensientEffectsController.shared.showIdle()
                     }
-                    .onChange(of: geometry.size) { _, newSize in
-                        Task { @MainActor in
-                            LensientEffectsController.shared.setViewSize(newSize)
-                        }
+                }
+                .onChange(of: geometry.size) { _, newSize in
+                    screenCenter = CGPoint(x: newSize.width / 2, y: newSize.height / 2)
+                    Task { @MainActor in
+                        LensientEffectsController.shared.setViewSize(newSize)
                     }
                 }
             }
@@ -246,7 +295,6 @@ struct OverlayView: View {
                 if newValue == true {
                     resetAllSelectionStates() 
                     startDate = Date()
-                    // Show shimmer at center when overlay appears
                     Task { @MainActor in
                         LensientEffectsController.shared.showIdle()
                     }
