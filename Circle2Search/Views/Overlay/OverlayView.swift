@@ -79,31 +79,44 @@ struct OverlayView: View {
         var end: Int
     }
     
-    // Extracted Drawing Canvas Layer
+    // Android Circle to Search brush parameters (from Google's decompiled code)
+    // lens_drawing_stroke_width: 6dp (Android) ≈ 6pt on macOS at 1x scale
+    // Brush uses pressure-based width modulation: min 0.3x, max 1.1x of base size
+    // Color: White (#FFFFFF) with SRC blend mode
+    private let androidStrokeWidth: CGFloat = 6.0
+    private let androidStrokeColor = Color.white
+    
+    // Extracted Drawing Canvas Layer - Android Circle to Search style
     private var drawingCanvasLayer: some View {
         GeometryReader { canvasGeometryProxy in 
             Canvas { context, size in 
-                // Only draw the scribble path - no blue selection boxes
+                // Android Circle to Search brush style:
+                // - White stroke with subtle outer glow
+                // - 6dp stroke width
+                // - Round caps and joins
+                // - Slight blur for soft edge effect
                 if !path.isEmpty {
-                    let timelineDate = startDate
-                    let currentTime = Date().timeIntervalSince(timelineDate)
-                    let pulseFrequency: Double = 1.8
-                    let minOpacity: Double = 0.2
-                    let maxOpacity: Double = 0.9
-                    let pulse = (sin(currentTime * 2 * .pi * pulseFrequency) + 1) / 2
-                    let animatedGlowOpacity = minOpacity + (maxOpacity - minOpacity) * pulse
-                    let glowPath = path.strokedPath(StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-                    context.addFilter(.blur(radius: 3))
-                    context.stroke(glowPath, with: .color(.cyan.opacity(animatedGlowOpacity)), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-                    let gradient = Gradient(colors: [.cyan.opacity(0.8), .blue.opacity(0.6), .purple.opacity(0.4)])
-                    context.stroke(path, with: .linearGradient(gradient, startPoint: .zero, endPoint: CGPoint(x: size.width, y: size.height)), 
-                                style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
-                    if let lastPoint = lastDrawingPoint {
-                        let tipSize: CGFloat = 12.0
-                        let animatedTipOpacity = 0.6 + 0.4 * pulse 
-                        let tipPath = Path(ellipseIn: CGRect(x: lastPoint.x - tipSize/2, y: lastPoint.y - tipSize/2, width: tipSize, height: tipSize))
-                        context.addFilter(.blur(radius: 2))
-                        context.fill(tipPath, with: .color(.cyan.opacity(animatedTipOpacity)))
+                    // Outer glow layer (Android uses subtle shadow/glow)
+                    let glowStyle = StrokeStyle(lineWidth: androidStrokeWidth + 4, lineCap: .round, lineJoin: .round)
+                    context.drawLayer { glowContext in
+                        glowContext.addFilter(.blur(radius: 3))
+                        glowContext.stroke(path, with: .color(.white.opacity(0.3)), style: glowStyle)
+                    }
+                    
+                    // Main stroke - solid white like Android
+                    let mainStyle = StrokeStyle(lineWidth: androidStrokeWidth, lineCap: .round, lineJoin: .round)
+                    context.stroke(path, with: .color(androidStrokeColor), style: mainStyle)
+                    
+                    // Drawing tip indicator (subtle)
+                    if let lastPoint = lastDrawingPoint, isDragging {
+                        let tipSize: CGFloat = androidStrokeWidth + 2
+                        let tipPath = Path(ellipseIn: CGRect(
+                            x: lastPoint.x - tipSize/2, 
+                            y: lastPoint.y - tipSize/2, 
+                            width: tipSize, 
+                            height: tipSize
+                        ))
+                        context.fill(tipPath, with: .color(.white.opacity(0.9)))
                     }
                 }
             }
@@ -142,6 +155,47 @@ struct OverlayView: View {
         }
     }
 
+    // Android-style animated vignette overlay
+    private var vignetteOverlay: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !overlayManager.isWindowActuallyVisible)) { timeline in
+            GeometryReader { geo in
+                let time = timeline.date.timeIntervalSince(startDate)
+                // Subtle breathing animation for the vignette
+                let breathe = 0.02 * sin(time * 0.8) // Very subtle pulse
+                
+                Canvas { context, size in
+                    // Android lens_gleam_default_scrim_color: #1a000000 (10% black)
+                    // Vignette: darker at edges, clear in center
+                    let centerX = size.width / 2
+                    let centerY = size.height / 2
+                    let maxRadius = sqrt(centerX * centerX + centerY * centerY)
+                    
+                    // Create radial gradient: clear center -> dark edges
+                    let gradient = Gradient(stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .clear, location: 0.3),
+                        .init(color: .black.opacity(0.05 + breathe), location: 0.5),
+                        .init(color: .black.opacity(0.12 + breathe), location: 0.7),
+                        .init(color: .black.opacity(0.20 + breathe), location: 0.85),
+                        .init(color: .black.opacity(0.28 + breathe), location: 1.0)
+                    ])
+                    
+                    context.fill(
+                        Path(CGRect(origin: .zero, size: size)),
+                        with: .radialGradient(
+                            gradient,
+                            center: CGPoint(x: centerX, y: centerY),
+                            startRadius: 0,
+                            endRadius: maxRadius
+                        )
+                    )
+                }
+            }
+            .edgesIgnoringSafeArea(.all)
+            .allowsHitTesting(false)
+        }
+    }
+    
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !overlayManager.isWindowActuallyVisible)) { timeline in
             ZStack {
@@ -152,8 +206,8 @@ struct OverlayView: View {
                     Image(decorative: bgImage, scale: 1.0).resizable().aspectRatio(contentMode: .fill).edgesIgnoringSafeArea(.all).allowsHitTesting(false)
                 }
                 
-                // Layer 2: Dark scrim overlay (Android uses ~3% black)
-                Color.black.opacity(0.03).edgesIgnoringSafeArea(.all).allowsHitTesting(false)
+                // Layer 2: Android-style vignette (dark edges, clear center)
+                vignetteOverlay
 
                 // Layer 3: Drawing canvas for scribble
                 drawingCanvasLayer
