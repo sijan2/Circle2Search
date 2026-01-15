@@ -42,7 +42,7 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(captureController.isStreamActive)
+            .disabled(captureController.isCapturing)
 
             // --- Hotkey Settings ---
             Divider() // Add separator

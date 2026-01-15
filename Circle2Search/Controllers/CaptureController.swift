@@ -41,174 +41,72 @@ enum CaptureError: Error {
 
 // Handles the screen capture logic
 @MainActor
-final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput {
+final class CaptureController: NSObject, ObservableObject {
     // MARK: - Properties
-    @Published var isStreamActive: Bool = false
+    @Published var isCapturing: Bool = false
     var previousApp: NSRunningApplication?
     private var currentBackgroundImage: CGImage?
-    private var stream: SCStream?
-    private var continuation: CheckedContinuation<Void, Error>? // For awaiting frame
-    private var currentDetailedTextRegions: [DetailedTextRegion] = [] // Store initially detected regions
+    private var currentDetailedTextRegions: [DetailedTextRegion] = []
 
     // MARK: - Capture Initiation
 
-    /// Checks permissions and starts the screen capture process.
     func startCapture() {
-        // ADDED: Explicitly dismiss any existing overlay from OverlayManager
-        // This helps ensure its state is clean before we check isStreamActive
-        // or try to show a new overlay later.
         OverlayManager.shared.dismissOverlay()
 
-        guard !isStreamActive else {
-            print("Capture session already active.")
+        guard !isCapturing else {
+            print("Capture already active.")
             return
         }
 
-        // Check for screen capture permissions first.
-        Task { @MainActor in // Use MainActor for permission checks/UI
+        Task { @MainActor in
             guard await checkAndRequestPermissions() else {
-                 // PermissionManager already shows alert if denied
-                 print("CaptureController: Permission not granted, aborting capture.")
+                 print("CaptureController: Permission not granted.")
                  return
             }
 
-            // Permission granted, proceed with capture setup
-            isStreamActive = true
-            print("Starting capture process...")
-
+            isCapturing = true
+            
             do {
-                try await setupAndStartStream()
-                print("Stream setup and started successfully. Waiting for frame...")
-                // Now wait for the delegate method to capture the frame
+                try await captureScreenshot()
             } catch {
-                print("Error starting capture: \(error)")
-                self.isStreamActive = false
-                // Handle error (e.g., show alert to user)
+                print("Error capturing screenshot: \(error)")
             }
+            
+            isCapturing = false
         }
     }
 
-    // MARK: - Permission Handling (Using PermissionManager)
+    // MARK: - Permission Handling
 
-    /// Checks screen capture permission status and requests if needed.
-    /// Returns true if permission is granted, false otherwise.
     private func checkAndRequestPermissions() async -> Bool {
-        // Use the centralized PermissionManager
         return await PermissionManager.shared.requestScreenRecordingPermission()
     }
 
+    // MARK: - Screenshot Capture (SCScreenshotManager - no screen sharing indicator)
 
-    // MARK: - Stream Setup and Delegate Methods
-
-    private func setupAndStartStream() async throws {
+    private func captureScreenshot() async throws {
         let content = try await SCShareableContent.current
         guard let display = content.displays.first else {
-            print("No displays found.")
             throw CaptureError.noDisplaysFound
         }
 
         let config = SCStreamConfiguration()
-        config.width = display.width
-        config.height = display.height
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        config.queueDepth = 1
+        config.width = display.width * 2
+        config.height = display.height * 2
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = false
 
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
-
-        stream = SCStream(filter: filter, configuration: config, delegate: self)
-        guard let stream = stream else {
-            print("Failed to create SCStream.")
-            throw CaptureError.streamCreationFailed
-        }
-
-        let processingQueue = DispatchQueue(label: "com.circle2search.capture", qos: .userInitiated)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: processingQueue)
-
-        // Use a continuation to wait for the first frame
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            self.continuation = continuation
-            stream.startCapture { [weak self] error in
-                if let error = error {
-                    print("Stream startCapture failed with error: \(error)")
-                    self?.continuation?.resume(throwing: error)
-                    self?.continuation = nil // Clear continuation on error
-                    DispatchQueue.main.async {
-                         self?.isStreamActive = false
-                    }
-                } else {
-                    print("Stream capture started successfully.")
-                    // Continuation will be resumed by the delegate when a frame arrives or an error occurs
-                }
-            }
-        }
-    }
-
-    // SCStreamDelegate method: Called when a frame is available
-    nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        Task { @MainActor [weak self] in
-            self?.handleSampleBuffer(stream: stream, sampleBuffer: sampleBuffer, type: type)
-        }
-    }
-
-    @MainActor
-    private func handleSampleBuffer(stream: SCStream, sampleBuffer: CMSampleBuffer, type: SCStreamOutputType) {
-        guard type == .screen, sampleBuffer.isValid else {
-            print("Invalid sample buffer or wrong type received.")
-            return
-        }
-
-        // Check if we are still waiting for the first frame
-        guard continuation != nil else {
-            // We already got the frame we needed, ignore subsequent ones for this capture session
-            return
-        }
-
-        print("Received valid screen sample buffer.")
-
-        // Stop capture immediately after receiving the first valid frame
-        stream.stopCapture { [weak self] error in
-            if let error = error {
-                print("Error stopping stream: \(error)")
-                // If stopping fails, try to resume continuation with error?
-                self?.continuation?.resume(throwing: CaptureError.captureCancelled) // Indicate failure
-            } else {
-                print("Stream capture stopped successfully.")
-                // If stopping succeeds, proceed with frame processing
-                self?.processFrame(sampleBuffer)
-            }
-            // In either case (success or failure stopping), clear the continuation
-            self?.continuation = nil
-            DispatchQueue.main.async {
-                self?.isStreamActive = false // Mark as inactive
-            }
-        }
-    }
-
-     // Separate function to process the captured frame
-    private func processFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard let cvImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            print("Failed to get CVPixelBuffer from sample buffer.")
-            continuation?.resume(throwing: CaptureError.frameCaptureFailed)
-            return
-        }
-
-        // Create CGImage from the CVPixelBuffer
-        let ciImage = CIImage(cvPixelBuffer: cvImageBuffer)
-        let context = CIContext(options: nil)
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
-            print("Failed to create CGImage from CIImage.")
-            continuation?.resume(throwing: CaptureError.imageConversionFailed)
-            return
-        }
-
-        print("Successfully captured frame as CGImage.")
+        
+        // Single screenshot - no stream, no screen sharing indicator
+        let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        
+        print("Screenshot captured.")
         self.currentBackgroundImage = cgImage
         self.previousApp = NSWorkspace.shared.frontmostApplication
         self.currentDetailedTextRegions = []
 
-        // Show overlay IMMEDIATELY - don't wait for OCR
+        // Show overlay immediately
         NSCursor.crosshair.set()
         OverlayManager.shared.showOverlay(
             backgroundImage: self.currentBackgroundImage,
@@ -220,33 +118,17 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
             }
         )
 
-        // Run OCR in background, update OverlayManager when done
+        // Run OCR in background
         Task.detached(priority: .userInitiated) { [weak self, cgImage] in
             await self?.detectInitialTextRegions(image: cgImage)
         }
- 
-        continuation?.resume(returning: ())
     }
 
-    // SCStreamDelegate method: Called when the stream stops with an error
-    nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
-        Task { @MainActor [weak self] in
-            print("Stream stopped with error: \(error)")
-            // Resume the continuation with the error if it's still waiting
-            self?.continuation?.resume(throwing: error)
-            self?.continuation = nil
-            self?.isStreamActive = false
-        }
-    }
+    // MARK: - Path Handling & Analysis
 
-
-    // MARK: - Path Handling & Analysis (Existing Code)
-
-    // This function is called when the user finishes drawing a path or cancels.
     private func handleSelectionCompletion(_ selectedPath: Path?, brushedText: String?) async {
-        NSCursor.arrow.set() // Reset cursor at the beginning of completion handling
+        NSCursor.arrow.set()
 
-        // Enhanced Logging
         print("CaptureController: handleSelectionCompletion entered.")
         if let path = selectedPath {
             print("  - selectedPath is: not nil, BoundingRect: \(path.boundingRect)")
@@ -258,7 +140,6 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
         if let text = brushedText, !text.isEmpty {
             print("Handling selection based on brushed text: '\(text)'")
             ResultPanel.shared.presentGoogleQuery(text)
-            // No need to crop or re-recognize if OverlayView provides exact text.
             return
         }
 
@@ -269,20 +150,14 @@ final class CaptureController: NSObject, ObservableObject, SCStreamDelegate, SCS
         }
 
         print("Handling selection: No brushed text and no valid path, or fullImage is nil. Cleaning up.")
-        // If we reach here, it means no action was taken with the selection.
-        // OverlayManager.dismissOverlay() should be called by OverlayView on cancellation (e.g., ESC key)
-        // or if the user clicks outside, etc. If not, we might need to ensure dismissal here.
-        // For now, assuming OverlayView handles its own dismissal on no-action/cancel.
-        // If activatePreviousApp is needed, it's often part of dismissOverlay logic.
-        if self.currentBackgroundImage == nil { // Or if fullImage was nil for path case & no action taken
+        if self.currentBackgroundImage == nil {
              activatePreviousApp()
         }
     }
 
-    // Helper function for the original path-based selection logic
     private func processPathBasedSelection(_ path: Path, fullImage: CGImage) async {
         print("Processing path-based selection logic...")
-        let pathBoundsInOverlayCoords = path.boundingRect // These are in overlay's coordinate space
+        let pathBoundsInOverlayCoords = path.boundingRect
         let imageWidth = CGFloat(fullImage.width)
         let imageHeight = CGFloat(fullImage.height)
 
