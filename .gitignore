@@ -1,0 +1,22 @@
+# Decompiled Android files
+decompiled/
+
+# Native Android libraries
+native_libs/
+
+# Circle2Search analysis/documentation
+*_ANALYSIS.md
+*_ARCHITECTURE.md
+
+# Xcode user data
+*.xcuserdata/
+*.xcuserdatad/
+xcuserdata/
+
+# Build artifacts
+build/
+DerivedData/
+*.profraw
+
+# macOS
+.DS_Store
