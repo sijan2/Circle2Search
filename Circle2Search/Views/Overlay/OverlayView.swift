@@ -48,101 +48,73 @@ struct RippleEffect<T: Equatable>: ViewModifier {
 
 struct OverlayView: View {
     
-    // MARK: - Nested Types
+    // MARK: - Environment
     
-    struct SelectableWord: Identifiable, Equatable {
-        let id = UUID()
-        let text: String
-        let screenRect: CGRect       
-        let normalizedRect: CGRect   // Original normalized rect from Vision for this word/segment
-        let globalIndex: Int         // Unique index in the flattened list of all words
-        let sourceRegionIndex: Int   // Index of the parent DetailedTextRegion
-        let sourceWordSwiftRange: Range<String.Index> // Range within the source region's full string
-    }
-    enum SelectionHandle { case start, end, none }
-
+    @Environment(\.colorScheme) var colorScheme
     
-    // MARK: - Properties
+    // MARK: - Dependencies
     
     @ObservedObject var overlayManager: OverlayManager
     var backgroundImage: CGImage?
+    @Binding var showOverlay: Bool
+    var completion: (Path?, String?, CGRect?) -> Void
+    
+    // MARK: - Drawing State
+    
     @State var path = Path()
-    @State var drawingPoints: [CGPoint] = [] // Keep track for potential analysis/smoothing
-    @State var brushedSelectedText: String = "" // NEW: For the precise brushed text
-    @State var activeSelectionWordRects: [CGRect] = [] // RENAMED: For clarity, as it will now store word/segment bounding boxes
-    @State var selectedTextIndices: Set<Int> = [] // <-- ADDED: To track selected text
-    @State var hoveredTextIndex: Int? = nil // NEW: For hover effect
-    @State private var showSearchButton = false // For confirming drag selection
-    @Binding var showOverlay: Bool // Use binding to allow dismissal from here
-    var completion: (Path?, String?, CGRect?) -> Void // Path is nil if cancelled, String? for brushed text, CGRect? for selection bounds
-    
-    // Ripple effect state
-    @State private var appearRippleTrigger: Int = 0
-    @State private var screenCenter: CGPoint = .zero
-
-    // Environment to detect Dark Mode
-    @Environment(\.colorScheme) var colorScheme
-
-    // State for animation timing
-    @State private var startDate = Date()
-
-    // Gesture state
-    @State var isDragging = false
-
-    // ESC key monitor
-    @State var escapeEventMonitor: Any?
-
-    @FocusState private var isViewFocused: Bool
-
-    // Animation state
-    @State private var glowOpacity: Double = 0.0
-    @State private var glowScale: CGFloat = 1.0
+    @State var drawingPoints: [CGPoint] = []
     @State var lastDrawingPoint: CGPoint?
-    @State private var drawingAnimation: Animation?
-
-    // Add new state variables for selection handles
-    @State var selectionStartHandle: CGPoint?
-    @State var selectionEndHandle: CGPoint?
-    @State var isDraggingHandle: Bool = false // True if a selection handle is being dragged
-    @State var draggedHandleType: SelectionHandle = .none // Which handle is being dragged
-    @State var selectedTextRange: TextSelectionRange?
+    @State var isDragging = false
     
-    // State for handle-based selection refinement
-    @State var isHandleSelectionActive: Bool = false
-    @State var startHandleWordGlobalIndex: Int? // Global index in allSelectableWords
-    @State var endHandleWordGlobalIndex: Int?   // Global index in allSelectableWords
-    // Screen rects for drawing the start and end handles accurately
-    @State var currentSelectionStartHandleRect: CGRect? 
-    @State var currentSelectionEndHandleRect: CGRect?  
-    // All words forming the current selection controlled by handles
-    @State var currentHandleSelectionRects: [CGRect] = [] 
-    @State var textForCurrentHandleSelection: String = ""
+    // MARK: - Selection State
     
-    // Ripple effect state
-    @State var rippleOrigin: CGPoint = .zero
-    @State var rippleTrigger: Int = 0
-
-    // Processed list of all words with their properties
+    @State var brushedSelectedText: String = ""
+    @State var activeSelectionWordRects: [CGRect] = []
+    @State var selectedTextIndices: Set<Int> = []
+    @State var hoveredTextIndex: Int? = nil
     @State var allSelectableWords: [SelectableWord] = []
     
-    // Throttling for selection updates (performance optimization)
+    // MARK: - Handle Selection State
+    
+    @State var isHandleSelectionActive: Bool = false
+    @State var isDraggingHandle: Bool = false
+    @State var draggedHandleType: SelectionHandle = .none
+    @State var selectedTextRange: TextSelectionRange?
+    @State var startHandleWordGlobalIndex: Int?
+    @State var endHandleWordGlobalIndex: Int?
+    @State var currentSelectionStartHandleRect: CGRect? 
+    @State var currentSelectionEndHandleRect: CGRect?  
+    @State var currentHandleSelectionRects: [CGRect] = [] 
+    @State var textForCurrentHandleSelection: String = ""
+    @State var selectionStartHandle: CGPoint?
+    @State var selectionEndHandle: CGPoint?
+    
+    // MARK: - Animation State
+    
+    @State private var appearRippleTrigger: Int = 0
+    @State private var screenCenter: CGPoint = .zero
+    @State private var startDate = Date()
+    @State private var glowOpacity: Double = 0.0
+    @State private var glowScale: CGFloat = 1.0
+    @State private var drawingAnimation: Animation?
+    @State var rippleOrigin: CGPoint = .zero
+    @State var rippleTrigger: Int = 0
+    
+    // MARK: - UI State
+    
+    @State private var showSearchButton = false
+    @State var escapeEventMonitor: Any?
+    @FocusState private var isViewFocused: Bool
+    
+    // MARK: - Throttling (Performance)
+    
     @State private var lastSelectionUpdateTime: Date = .distantPast
-    private let selectionUpdateThrottleInterval: TimeInterval = 0.016 // ~60fps, 16ms
-    
-    // Throttling for hover updates (performance optimization)
+    private let selectionUpdateThrottleInterval: TimeInterval = 0.016
     @State private var lastHoverUpdateTime: Date = .distantPast
-    private let hoverUpdateThrottleInterval: TimeInterval = 0.033 // ~30fps, 33ms for hover
-
-    // ADDED: Struct for text selection range to conform to Equatable
-    struct TextSelectionRange: Equatable {
-        var start: Int
-        var end: Int
-    }
+    private let hoverUpdateThrottleInterval: TimeInterval = 0.033
     
-    // Android Circle to Search brush parameters (from Google's decompiled code)
-    // lens_drawing_stroke_width: 6dp (Android) ≈ 6pt on macOS at 1x scale
-    // Brush uses pressure-based width modulation: min 0.3x, max 1.1x of base size
-    // Color: White (#FFFFFF) with SRC blend mode
+    // MARK: - Constants
+    
     private let androidStrokeWidth: CGFloat = 6.0
     private let androidStrokeColor = Color.white
     
