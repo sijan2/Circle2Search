@@ -111,9 +111,9 @@ final class CaptureController: NSObject, ObservableObject {
         OverlayManager.shared.showOverlay(
             backgroundImage: self.currentBackgroundImage,
             previousApp: self.previousApp,
-            completion: { [weak self] selectedPath, finalBrushedText in
+            completion: { [weak self] selectedPath, finalBrushedText, selectionRect in
                 Task { [weak self] in 
-                    await self?.handleSelectionCompletion(selectedPath, brushedText: finalBrushedText)
+                    await self?.handleSelectionCompletion(selectedPath, brushedText: finalBrushedText, selectionRect: selectionRect)
                 }
             }
         )
@@ -126,7 +126,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     // MARK: - Path Handling & Analysis
 
-    private func handleSelectionCompletion(_ selectedPath: Path?, brushedText: String?) async {
+    private func handleSelectionCompletion(_ selectedPath: Path?, brushedText: String?, selectionRect: CGRect?) async {
         NSCursor.arrow.set()
 
         print("CaptureController: handleSelectionCompletion entered.")
@@ -136,10 +136,11 @@ final class CaptureController: NSObject, ObservableObject {
             print("  - selectedPath is: nil")
         }
         print("  - brushedText is: '\(brushedText ?? "nil")'")
+        print("  - selectionRect is: \(String(describing: selectionRect))")
 
         if let text = brushedText, !text.isEmpty {
             print("Handling selection based on brushed text: '\(text)'")
-            ResultPanel.shared.presentGoogleQuery(text)
+            ResultPanel.shared.presentGoogleQuery(text, selectionRect: selectionRect)
             return
         }
 

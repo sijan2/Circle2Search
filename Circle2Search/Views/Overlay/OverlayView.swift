@@ -70,7 +70,7 @@ struct OverlayView: View {
     @State private var hoveredTextIndex: Int? = nil // NEW: For hover effect
     @State private var showSearchButton = false // For confirming drag selection
     @Binding var showOverlay: Bool // Use binding to allow dismissal from here
-    var completion: (Path?, String?) -> Void // Path is nil if cancelled, added String? for the brushed text
+    var completion: (Path?, String?, CGRect?) -> Void // Path is nil if cancelled, String? for brushed text, CGRect? for selection bounds
     
     // Ripple effect state
     @State private var appearRippleTrigger: Int = 0
@@ -415,7 +415,7 @@ struct OverlayView: View {
                     
                     let pathToReturn = self.path
                     resetAllSelectionStates()
-                    completion(pathToReturn, nil)
+                    completion(pathToReturn, nil, pathBounds)
                 } else {
                     print("OverlayView: Drag ended. No brushed text and no significant path drawn. Resetting.")
                     
@@ -423,7 +423,7 @@ struct OverlayView: View {
                         LensientEffectsController.shared.hide()
                     }
                     
-                    completion(nil, nil)
+                    completion(nil, nil, nil)
                     resetAllSelectionStates()
                 }
             }
@@ -508,7 +508,8 @@ struct OverlayView: View {
     // Called when the user confirms the selection (e.g., clicks the button)
     func confirmSelection() {
         let textToSend = isHandleSelectionActive ? textForCurrentHandleSelection : brushedSelectedText
-        completion(self.path, textToSend.isEmpty ? nil : textToSend)
+        let selectionBounds = activeSelectionWordRects.reduce(CGRect.null) { $0.union($1) }
+        completion(self.path, textToSend.isEmpty ? nil : textToSend, selectionBounds.isNull ? nil : selectionBounds)
         
         // Trigger ripple effect at the center of the selection
         if !activeSelectionWordRects.isEmpty {
@@ -575,7 +576,7 @@ struct OverlayView: View {
     func cancelSelection() {
         resetAllSelectionStates()
         Task { @MainActor in ResultPanel.shared.hide() }
-        completion(nil, nil)
+        completion(nil, nil, nil)
         showOverlay = false
     }
 
@@ -685,7 +686,8 @@ struct OverlayView: View {
                                                       draggedHandle: self.draggedHandleType, 
                                                       canvasSize: canvasSize)
                     if !self.textForCurrentHandleSelection.isEmpty {
-                         self.completion(nil, self.textForCurrentHandleSelection)
+                        let handleSelectionBounds = self.currentHandleSelectionRects.reduce(CGRect.null) { $0.union($1) }
+                        self.completion(nil, self.textForCurrentHandleSelection, handleSelectionBounds.isNull ? nil : handleSelectionBounds)
                     }
                     // else { // If selection became empty via handles, it might revert to no selection
                     //    self.isHandleSelectionActive = false
@@ -916,9 +918,9 @@ struct OverlayView_Previews: PreviewProvider {
             overlayManager: previewManager,
             backgroundImage: dummyImage,
             showOverlay: $previewShowOverlay
-        ) { selectedPath, selectedText in
+        ) { selectedPath, selectedText, selectionRect in
             if let path = selectedPath {
-                print("Preview completed with path: \(path.boundingRect), selected text: \(String(describing: selectedText))")
+                print("Preview completed with path: \(path.boundingRect), selected text: \(String(describing: selectedText)), rect: \(String(describing: selectionRect))")
             } else {
                 print("Preview cancelled")
             }

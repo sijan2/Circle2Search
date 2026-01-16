@@ -15,12 +15,12 @@ class OverlayManager: ObservableObject {
 
     private var overlayWindow: KeyAcceptingWindow?
     var overlayContentView: NSView? // Store the content view (internal access is default)
-    private var currentCompletion: ((Path?, String?) -> Void)?
+    private var currentCompletion: ((Path?, String?, CGRect?) -> Void)?
     private var previousActiveApp: NSRunningApplication?
     private var visibilityObservation: NSKeyValueObservation?
 
     // Function to show the overlay
-    func showOverlay(backgroundImage image: CGImage?, previousApp: NSRunningApplication?, completion: @escaping (Path?, String?) -> Void) {
+    func showOverlay(backgroundImage image: CGImage?, previousApp: NSRunningApplication?, completion: @escaping (Path?, String?, CGRect?) -> Void) {
         guard overlayWindow == nil else {
             print("Overlay already shown.")
             return
@@ -33,14 +33,14 @@ class OverlayManager: ObservableObject {
         // Get screen details
         guard let screen = NSScreen.main else {
             print("Error: Could not get main screen.")
-            completion(nil, nil)
+            completion(nil, nil, nil)
             return
         }
 
         // Ensure we actually received an image
         guard let validImage = image else {
              print("OverlayManager: Received nil image for overlay.")
-             completion(nil, nil)
+             completion(nil, nil, nil)
              return
         }
 
@@ -60,8 +60,8 @@ class OverlayManager: ObservableObject {
                     self.isOverlayVisible = newValue
                 }
             ),
-            completion: { [weak self] path, brushedTextFromOverlay in
-                self?.handleSelectionCompletion(path: path, brushedText: brushedTextFromOverlay)
+            completion: { [weak self] path, brushedTextFromOverlay, selectionRect in
+                self?.handleSelectionCompletion(path: path, brushedText: brushedTextFromOverlay, selectionRect: selectionRect)
             }
         )
 
@@ -139,14 +139,14 @@ class OverlayManager: ObservableObject {
     }
 
     // Internal handler called by OverlayView's completion callback
-    private func handleSelectionCompletion(path: Path?, brushedText: String?) { // UPDATED: Signature for brushedText
-        print("OverlayManager handling completion. Path received: \(path != nil), Brushed Text: \(brushedText ?? "nil")")
+    private func handleSelectionCompletion(path: Path?, brushedText: String?, selectionRect: CGRect?) {
+        print("OverlayManager handling completion. Path received: \(path != nil), Brushed Text: \(brushedText ?? "nil"), SelectionRect: \(String(describing: selectionRect))")
         
         // No longer need to combine query from indices here; CaptureController gets the direct text.
         // The `currentDetailedRegions` (previously `currentDetectedTexts`) were used for this combining step.
         // Now, the `brushedText` is the primary piece of information from OverlayView.
         
-        currentCompletion?(path, brushedText) // Pass path and brushedText along
+        currentCompletion?(path, brushedText, selectionRect) // Pass path, brushedText, and selectionRect along
 
         print("OverlayManager: handleSelectionCompletion finished. Overlay remains visible for further interaction.")
     }
@@ -177,7 +177,7 @@ class OverlayManager: ObservableObject {
 
         if currentCompletion != nil {
             print("Dismiss triggered before completion - signalling cancellation.")
-            currentCompletion?(nil, nil)
+            currentCompletion?(nil, nil, nil)
             currentCompletion = nil 
         }
     }

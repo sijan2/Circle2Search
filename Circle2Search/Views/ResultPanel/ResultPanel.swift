@@ -3,31 +3,36 @@ import Cocoa
 import SwiftUI // Using SwiftUI for the embedded WebView
 
 @MainActor
-class ResultPanel: NSObject, NSWindowDelegate {
+class ResultPanel: NSObject, NSPopoverDelegate {
     
     static let shared = ResultPanel()
     
-    private var resultDisplayWindow: NSPanel?
+    private var popover: NSPopover?
     private var hostingController: NSHostingController<ResultDisplayView>?
     private var webViewModel: WebViewModel! // Will be initialized before first use
+    
+    // Store the positioning info for the popover
+    private var currentSelectionRect: CGRect?
 
     // Store initial dimensions used for URL generation
-    private var currentPanelWidth: CGFloat = 500 // Default, matches user's last change
-    private var currentPanelHeight: CGFloat = 500 // Default
+    private var currentPanelWidth: CGFloat = 360
+    private var currentPanelHeight: CGFloat = 500
 
     private override init() { super.init() }
     
-    func presentGoogleQuery(_ query: String) {
+    func presentGoogleQuery(_ query: String, selectionRect: CGRect? = nil) {
+        self.currentSelectionRect = selectionRect
         // Use the currentPanelWidth and currentPanelHeight for biw and bih
         let searchURLString = WebViewModel.googleSearchURL(for: query, 
                                                            width: Int(currentPanelWidth),
                                                            height: Int(currentPanelHeight))
-        print("ResultPanel: Presenting query: \(query) with URL: \(searchURLString)")
-        setupWindowIfNeeded(initialURL: searchURLString, query: query)
+        print("ResultPanel: Presenting query: \(query) with URL: \(searchURLString), selectionRect: \(String(describing: selectionRect))")
+        setupPopoverIfNeeded(initialURL: searchURLString, query: query)
     }
     
     // New method to present a URL directly (e.g., from Lens search result)
-    func presentLensResult(url: URL) {
+    func presentLensResult(url: URL, selectionRect: CGRect? = nil) {
+        self.currentSelectionRect = selectionRect
         let urlString = url.absoluteString
         // The text for the top bar can be generic, or you might parse parts of the URL if useful
         let queryForDisplay = "Google Lens Result"
@@ -36,144 +41,157 @@ class ResultPanel: NSObject, NSWindowDelegate {
         
         // This existing method handles creating or updating the window and web view
         // It will use the urlString for the webViewModel.link
-        setupWindowIfNeeded(initialURL: urlString, query: queryForDisplay)
+        setupPopoverIfNeeded(initialURL: urlString, query: queryForDisplay)
     }
     
     func hide() {
-        guard let resultDisplayWindow = resultDisplayWindow else { return }
+        guard let popover = popover else { return }
         
-        NSAnimationContext.runAnimationGroup({
-            $0.duration = 0.15
-            resultDisplayWindow.animator().alphaValue = 0.0
-        }, completionHandler: {
-            resultDisplayWindow.orderOut(nil)
-            // Only nil out if we are truly done, not for a potential quick update.
-            // However, if hide is called, it implies the panel should go away.
-            self.resultDisplayWindow = nil 
-            self.hostingController = nil
-            // self.webViewModel = nil // If webViewModel should reset when hidden
-            print("ResultPanel: Hidden and resources released.")
-        })
+        popover.performClose(nil)
+        self.popover = nil
+        self.hostingController = nil
+        self.currentSelectionRect = nil
+        print("ResultPanel: Popover closed and resources released.")
     }
 
-    private func setupWindowIfNeeded(initialURL: String, query: String) {
-        if let existingWindow = resultDisplayWindow, let existingHostingController = hostingController {
-            print("ResultPanel: Window already exists. Updating URL and title.")
-            // Ensure webViewModel exists (should always be true if window exists)
+    private func setupPopoverIfNeeded(initialURL: String, query: String) {
+        // If popover already exists, just update the content
+        if let existingPopover = popover, existingPopover.isShown, let existingHostingController = hostingController {
+            print("ResultPanel: Popover already shown. Updating URL and title.")
             guard self.webViewModel != nil else {
-                print("Error: webViewModel is nil despite existing window. Recreating.")
-                // Fallthrough to recreate logic if something went wrong
-                self.resultDisplayWindow = nil // Force recreation
+                print("Error: webViewModel is nil despite existing popover. Recreating.")
+                self.popover?.close()
+                self.popover = nil
                 self.hostingController = nil
-                // Recurse or duplicate creation logic - simpler to fallthrough by nilling out window
-                return setupWindowIfNeeded(initialURL: initialURL, query: query)
+                return setupPopoverIfNeeded(initialURL: initialURL, query: query)
             }
 
-            self.webViewModel.link = initialURL // Update the link on the existing view model
+            self.webViewModel.link = initialURL
             
-            // Create a new ResultDisplayView with the new queryText but the same WebViewModel
             let updatedView = ResultDisplayView(
                 webViewModel: self.webViewModel,
                 queryText: query, 
                 onClose: { [weak self] in self?.hide() }
             )
-            existingHostingController.rootView = updatedView // Update the hosting controller's root view
-            
-            existingWindow.makeKeyAndOrderFront(nil)
-            NSAnimationContext.runAnimationGroup {
-                $0.duration = 0.15
-                existingWindow.animator().alphaValue = 1.0
-            }
+            existingHostingController.rootView = updatedView
             return
         }
         
-        print("ResultPanel: Setting up new popover-style result window.")
+        // Close any existing popover before creating new one
+        popover?.close()
+        popover = nil
+        hostingController = nil
+        
+        print("ResultPanel: Setting up new NSPopover.")
 
-        // Initialize WebViewModel if it doesn't exist (first time setup)
-        // Use the panel's initial width/height for the first URL generation
-        let initialWidth: CGFloat = 360 // User changed this
-        let initialHeight: CGFloat = 600
-        self.currentPanelWidth = initialWidth   // Store for future queries if panel not resized
-        self.currentPanelHeight = initialHeight // Store for future queries if panel not resized
+        // Initialize WebViewModel if needed
+        let initialWidth: CGFloat = 360
+        let initialHeight: CGFloat = 500
+        self.currentPanelWidth = initialWidth
+        self.currentPanelHeight = initialHeight
 
         if self.webViewModel == nil {
-            // Pass the initial dimensions for the very first URL
-            let firstURL = WebViewModel.googleSearchURL(for: query, width: Int(initialWidth), height: Int(initialHeight))
-            self.webViewModel = WebViewModel(link: firstURL) 
-            // initialURL passed to setupWindowIfNeeded already has these dimensions via presentGoogleQuery,
-            // but if called directly, webViewModel needs a link.
-            // Let's ensure initialURL is used for webViewModel link if it matches the query context.
-            self.webViewModel.link = initialURL // This initialURL should be already formatted with w/h
+            self.webViewModel = WebViewModel(link: initialURL)
         } else {
-            self.webViewModel.link = initialURL // initialURL is already formatted with current w/h
+            self.webViewModel.link = initialURL
         }
-        
-        let contentRect = NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight)
 
         let resultView = ResultDisplayView(
-            webViewModel: self.webViewModel, // Pass the managed WebViewModel
+            webViewModel: self.webViewModel,
             queryText: query, 
             onClose: { [weak self] in self?.hide() }
         )
         hostingController = NSHostingController(rootView: resultView)
+        hostingController?.view.frame = NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight)
         
-        resultDisplayWindow = NSPanel(
-            contentRect: contentRect,
-            styleMask: [.borderless, .nonactivatingPanel, .resizable], // ADDED .resizable
+        // Create the popover
+        popover = NSPopover()
+        popover?.contentSize = NSSize(width: initialWidth, height: initialHeight)
+        popover?.behavior = .semitransient // Allows interaction but closes on outside click
+        popover?.animates = true
+        popover?.contentViewController = hostingController
+        popover?.delegate = self
+        
+        // Show the popover anchored to the selection
+        showPopover()
+    }
+    
+    private func showPopover() {
+        guard let popover = popover else { return }
+        
+        // Get the overlay view to anchor the popover
+        guard let anchorView = OverlayManager.shared.overlayContentView else {
+            print("ResultPanel: No overlay content view available for anchoring popover. Falling back to screen center.")
+            // Fallback: show in a detached window if no anchor view
+            showPopoverDetached()
+            return
+        }
+        
+        // Convert selection rect to view coordinates
+        var positioningRect: CGRect
+        if let selectionRect = currentSelectionRect {
+            // The selection rect is in overlay view coordinates (top-left origin from SwiftUI)
+            // NSPopover expects the rect in the view's coordinate system
+            positioningRect = selectionRect
+        } else {
+            // No selection rect - position in center of view
+            let viewBounds = anchorView.bounds
+            positioningRect = CGRect(x: viewBounds.midX - 1, y: viewBounds.midY - 1, width: 2, height: 2)
+        }
+        
+        // Determine preferred edge based on position
+        // If selection is in upper half of screen, show below; otherwise show above
+        let preferredEdge: NSRectEdge
+        if let selectionRect = currentSelectionRect {
+            let screenHeight = anchorView.bounds.height
+            if selectionRect.midY < screenHeight / 2 {
+                preferredEdge = .maxY // Show above (selection is in lower half)
+            } else {
+                preferredEdge = .minY // Show below (selection is in upper half)
+            }
+        } else {
+            preferredEdge = .maxY
+        }
+        
+        print("ResultPanel: Showing popover at rect: \(positioningRect), edge: \(preferredEdge)")
+        popover.show(relativeTo: positioningRect, of: anchorView, preferredEdge: preferredEdge)
+    }
+    
+    private func showPopoverDetached() {
+        // Fallback when no anchor view is available - create a temporary window
+        guard let popover = popover, let hostingController = hostingController else { return }
+        
+        // Create a small invisible window at screen center to anchor the popover
+        guard let screen = NSScreen.main else { return }
+        let screenCenter = CGPoint(x: screen.frame.midX, y: screen.frame.midY)
+        
+        let anchorWindow = NSWindow(
+            contentRect: NSRect(x: screenCenter.x - 1, y: screenCenter.y - 1, width: 2, height: 2),
+            styleMask: .borderless,
             backing: .buffered,
             defer: false
         )
-
-        resultDisplayWindow?.isReleasedWhenClosed = true
-        resultDisplayWindow?.delegate = self 
-        resultDisplayWindow?.level = .floating 
-        resultDisplayWindow?.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        anchorWindow.isOpaque = false
+        anchorWindow.backgroundColor = .clear
+        anchorWindow.level = .floating
+        anchorWindow.orderFront(nil)
         
-        resultDisplayWindow?.isOpaque = false
-        resultDisplayWindow?.backgroundColor = .clear
-        resultDisplayWindow?.hasShadow = true
-        
-        resultDisplayWindow?.isMovableByWindowBackground = true
-        
-        // Setup Auto Layout for the hosting view
-        if let hcView = hostingController?.view {
-            hcView.translatesAutoresizingMaskIntoConstraints = false
-            resultDisplayWindow?.contentView?.addSubview(hcView)
-            if let superview = hcView.superview {
-                NSLayoutConstraint.activate([
-                    hcView.topAnchor.constraint(equalTo: superview.topAnchor),
-                    hcView.bottomAnchor.constraint(equalTo: superview.bottomAnchor),
-                    hcView.leadingAnchor.constraint(equalTo: superview.leadingAnchor),
-                    hcView.trailingAnchor.constraint(equalTo: superview.trailingAnchor)
-                ])
-            }
-        } else {
-             resultDisplayWindow?.contentView = hostingController?.view // Fallback if something is unusual
-        }
-        // hostingController?.view.frame = contentRect // No longer setting fixed frame
-        
-        resultDisplayWindow?.minSize = NSSize(width: 300, height: 200) // Set a reasonable min size
-        
-        resultDisplayWindow?.center()
-        resultDisplayWindow?.makeKeyAndOrderFront(nil)
-        resultDisplayWindow?.alphaValue = 0.0
-
-        NSAnimationContext.runAnimationGroup {
-            $0.duration = 0.15
-            resultDisplayWindow?.animator().alphaValue = 1.0
+        if let contentView = anchorWindow.contentView {
+            popover.show(relativeTo: contentView.bounds, of: contentView, preferredEdge: .maxY)
         }
     }
     
-    // Conformance to NSWindowDelegate
-    func windowWillClose(_ notification: Notification) {
-        if (notification.object as? NSWindow) == resultDisplayWindow {
-            print("ResultPanel: Window delegate detected close, releasing resources.")
-            resultDisplayWindow = nil 
-            hostingController = nil
-            // Consider whether webViewModel should be nilled out here too,
-            // or if it should persist until a completely new ResultPanel might be needed.
-            // If ResultPanel is a singleton, webViewModel could persist.
-        }
+    // MARK: - NSPopoverDelegate
+    
+    func popoverDidClose(_ notification: Notification) {
+        print("ResultPanel: Popover did close (delegate).")
+        // Don't nil out everything here - the popover might be closed temporarily
+        // Only clean up if we explicitly called hide()
+    }
+    
+    func popoverShouldDetach(_ popover: NSPopover) -> Bool {
+        // Allow the popover to be detached into a separate window
+        return true
     }
 }
 
