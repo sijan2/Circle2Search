@@ -1,4 +1,4 @@
-// LensientRenderer.swift - Simple shimmer renderer
+// LensientRenderer.swift - Metal renderer for shimmer effect
 import Foundation
 import Metal
 import MetalKit
@@ -6,16 +6,16 @@ import simd
 import AppKit
 import SwiftUI
 
-// MARK: - Shader Uniforms
+// MARK: - Shader Uniforms (must match Metal struct)
 struct ShimmerUniforms {
     var resolution: SIMD2<Float>
     var time: Float
     var opacity: Float
     var centerX: Float
     var centerY: Float
-    var radius: Float
-    var padding1: Float
-    var padding2: Float
+    var baseRadius: Float
+    var trackingAmount: Float
+    var particleRadius: Float
     var color0: SIMD4<Float>
     var color1: SIMD4<Float>
     var color2: SIMD4<Float>
@@ -83,7 +83,9 @@ class LensientRenderer: NSObject, MTKViewDelegate {
     
     nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         Task { @MainActor in
-            effectsController?.setViewSize(size)
+            // Calculate scale factor from drawable vs bounds
+            let scale = view.bounds.width > 0 ? size.width / view.bounds.width : 2.0
+            effectsController?.setViewSize(size, scale: scale)
         }
     }
     
@@ -101,22 +103,21 @@ class LensientRenderer: NSObject, MTKViewDelegate {
               let controller = effectsController else { return }
         
         let size = view.drawableSize
-        let time = controller.shaderTime
         
-        // Update uniforms
+        // Update uniforms from controller's spring values
         if let buffer = uniformBuffer {
             let ptr = buffer.contents().bindMemory(to: ShimmerUniforms.self, capacity: 1)
             let colors = controller.shimmerColors
             
             ptr.pointee = ShimmerUniforms(
                 resolution: SIMD2<Float>(Float(size.width), Float(size.height)),
-                time: time,
-                opacity: controller.opacity,
-                centerX: controller.centerX,
-                centerY: controller.centerY,
-                radius: controller.radius,
-                padding1: 0,
-                padding2: 0,
+                time: controller.shaderTime,
+                opacity: controller.opacity.current,
+                centerX: controller.centerX.current,
+                centerY: controller.centerY.current,
+                baseRadius: controller.baseRadius,
+                trackingAmount: controller.trackingAmount.current,
+                particleRadius: controller.particleRadius.current,
                 color0: SIMD4<Float>(colors[0], 0),
                 color1: SIMD4<Float>(colors[1], 0),
                 color2: SIMD4<Float>(colors[2], 0),
@@ -166,7 +167,6 @@ struct LensientMetalView: NSViewRepresentable {
         view.enableSetNeedsDisplay = false
         view.isPaused = false
         
-        // Remove any border/background
         view.wantsLayer = true
         view.layer?.borderWidth = 0
         view.layer?.cornerRadius = 0

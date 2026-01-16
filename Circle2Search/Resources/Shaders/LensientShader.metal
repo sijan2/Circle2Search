@@ -1,4 +1,4 @@
-// LensientShader.metal - Fullscreen shimmer with fluid bloom ripple
+// LensientShader.metal - Android Circle to Search shimmer effect
 #include <metal_stdlib>
 using namespace metal;
 
@@ -13,9 +13,9 @@ struct ShimmerUniforms {
     float opacity;
     float centerX;
     float centerY;
-    float radius;
-    float padding1;
-    float padding2;
+    float baseRadius;
+    float trackingAmount;     // 0 = fullscreen shimmer, 1 = brush tip only
+    float particleRadius;
     float4 color0;
     float4 color1;
     float4 color2;
@@ -46,12 +46,18 @@ float androidWiggle(float t, float phase, float amp) {
     return amp * (wave1 + wave2 + wave3);
 }
 
-float softCircle(float2 p, float r, float soft) {
-    return 1.0 - smoothstep(r - soft, r + soft, length(p));
+// Gaussian blur circle
+float blurryCircle(float2 pixelsToCenter, float radius) {
+    float blur = 3.0;
+    float dist2 = dot(pixelsToCenter, pixelsToCenter);
+    return exp(-blur * dist2 / (radius * radius));
 }
 
-float4 blendOver(float4 dst, float4 src) {
-    return src + (1.0 - src.a) * dst;
+float4 blendOver(float4 dst, float4 src, float alpha) {
+    float4 result;
+    result.rgb = src.rgb * alpha + dst.rgb * (1.0 - alpha);
+    result.a = alpha + dst.a * (1.0 - alpha);
+    return result;
 }
 
 vertex VertexOut shimmer_vertex(uint vid [[vertex_id]], constant float* verts [[buffer(0)]]) {
@@ -69,54 +75,83 @@ fragment float4 shimmer_fragment(VertexOut in [[stage_in]], constant ShimmerUnif
     float2 pixel = uv * u.resolution;
     float2 center = float2(u.centerX, u.centerY);
     float t = u.time;
+    float tracking = u.trackingAmount;
     
-    // Fluid bloom ripple - multiple waves from edges blooming inward/outward
-    float bloomDuration = 0.8;
-    float bloomT = min(t, bloomDuration) / bloomDuration;
-    float bloomEase = 1.0 - pow(1.0 - bloomT, 2.0); // Ease out quad
-    
-    // Ripple distortion - waves emanating everywhere like water
-    float2 normUV = uv - 0.5;
-    float dist = length(normUV);
-    
-    // Multiple ripple waves at different phases (flower petal feel)
-    float ripple1 = sin(dist * 25.0 - t * 8.0) * exp(-dist * 3.0);
-    float ripple2 = sin(dist * 18.0 - t * 6.0 + 1.0) * exp(-dist * 2.5);
-    float ripple3 = sin(dist * 12.0 - t * 4.0 + 2.0) * exp(-dist * 2.0);
-    
-    // Bloom fade - ripples are strong at start, settle down
-    float rippleFade = (1.0 - bloomEase) * 0.8;
-    float rippleStrength = (ripple1 + ripple2 * 0.7 + ripple3 * 0.5) * rippleFade;
-    
-    // Apply fluid distortion to pixel position
-    float2 rippleDir = normalize(normUV + 0.001);
-    float2 distortedPixel = pixel + rippleDir * rippleStrength * 60.0;
-    
-    // Shimmer blobs with distorted positions
-    float4 result = float4(0.0);
-    float baseR = u.radius;
-    float soft = baseR * 0.5;
-    float wiggleAmp = baseR * 0.35; // Increased for more spread
-    
-    for (int i = 0; i < 8; i++) {
-        float phase = float(i) * 0.785398;
-        float wiggleX = androidWiggle(t * 0.5, phase, wiggleAmp); // Original speed
-        float wiggleY = androidWiggle(t * 0.5, phase + 1.57, wiggleAmp);
-        float orbitAngle = phase + t * 0.15; // Original speed
-        float orbitR = baseR * 0.4; // Larger orbit for more spread
+    // ============================================
+    // MODE 1: FULLSCREEN SHIMMER (tracking = 0)
+    // ============================================
+    float4 fullscreenResult = float4(0.0);
+    if (tracking < 0.99) {
+        // Bloom effect on appear
+        float bloomDuration = 0.8;
+        float bloomT = clamp(t / bloomDuration, 0.0, 1.0);
+        float bloomEase = 1.0 - pow(1.0 - bloomT, 2.0);
         
-        float2 offset = float2(cos(orbitAngle) * orbitR + wiggleX, sin(orbitAngle) * orbitR + wiggleY);
-        float2 blobCenter = center + offset;
-        float alpha = softCircle(distortedPixel - blobCenter, baseR, soft);
+        // Ripple distortion
+        float2 normUV = uv - 0.5;
+        float dist = length(normUV);
+        float ripple = sin(dist * 20.0 - t * 6.0) * exp(-dist * 2.5);
+        float rippleFade = (1.0 - bloomEase) * 0.6;
+        float2 rippleOffset = normalize(normUV + 0.001) * ripple * rippleFade * 40.0;
+        float2 distortedPixel = pixel + rippleOffset;
         
-        float3 col = getColor(u, i);
-        result = blendOver(result, alpha * float4(col * col, 1.0));
+        float baseR = u.baseRadius;
+        float soft = baseR * 0.5;
+        float wiggleAmp = baseR * 0.35;
+        float2 screenCenter = u.resolution * 0.5;
+        
+        for (int i = 0; i < 8; i++) {
+            float phase = float(i) * 0.785398;
+            float wiggleX = androidWiggle(t * 0.5, phase, wiggleAmp);
+            float wiggleY = androidWiggle(t * 0.5, phase + 1.57, wiggleAmp);
+            float orbitAngle = phase + t * 0.15;
+            float orbitR = baseR * 0.4;
+            
+            float2 offset = float2(cos(orbitAngle) * orbitR + wiggleX, sin(orbitAngle) * orbitR + wiggleY);
+            float2 blobCenter = screenCenter + offset;
+            float alpha = blurryCircle(distortedPixel - blobCenter, baseR);
+            
+            float3 col = getColor(u, i);
+            col = col * col;
+            fullscreenResult = blendOver(fullscreenResult, float4(col, 1.0), alpha * 0.7);
+        }
+        
+        float bloomPulse = 1.0 + 0.3 * (1.0 - bloomEase);
+        fullscreenResult.rgb = sqrt(fullscreenResult.rgb) * bloomPulse;
     }
     
-    // Bloom brightness pulse
-    float bloomPulse = 1.0 + 0.4 * (1.0 - bloomEase);
+    // ============================================
+    // MODE 2: BRUSH TIP SHIMMER (tracking = 1)
+    // Simple centered glow that stays exactly at brush tip
+    // ============================================
+    float4 tipResult = float4(0.0);
+    if (tracking > 0.01) {
+        float tipRadius = u.particleRadius;
+        
+        // Single centered glow - NO offset, stays at exact pointer position
+        float dist = length(pixel - center);
+        float glow = exp(-3.0 * dist * dist / (tipRadius * tipRadius));
+        
+        // Slow, natural color cycling through Google colors
+        float colorPhase = t * 0.3;  // Very slow - takes ~3 seconds per color
+        int colorIdx = int(colorPhase) % 5;
+        float colorBlend = fract(colorPhase);
+        float3 col1 = getColor(u, colorIdx);
+        float3 col2 = getColor(u, (colorIdx + 1) % 5);
+        float3 tipColor = mix(col1, col2, colorBlend);
+        
+        // Boost brightness
+        tipColor = tipColor * tipColor;  // Gamma
+        tipColor = sqrt(tipColor) * 1.3;
+        
+        tipResult = float4(tipColor, 1.0) * glow;
+    }
     
-    result.rgb = sqrt(result.rgb) * bloomPulse;
+    // ============================================
+    // BLEND: Fullscreen fades, tip shows
+    // ============================================
+    float fullscreenFade = pow(1.0 - tracking, 2.0);
+    float4 result = fullscreenResult * fullscreenFade + tipResult;
     result *= u.opacity;
     
     return result;

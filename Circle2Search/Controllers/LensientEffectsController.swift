@@ -1,149 +1,194 @@
-// LensientEffectsController.swift - Simple shimmer controller
+// LensientEffectsController.swift - Android-style shimmer controller
 import Foundation
 import AppKit
 import QuartzCore
 import simd
 import Combine
 
-// MARK: - Shimmer State
-enum ShimmerState {
-    case hidden
-    case idle
-    case tracking
-    case selection
+// MARK: - State
+enum ShimmerState: Int {
+    case hidden = 0
+    case idle = 1        // Fullscreen shimmer
+    case tracking = 2    // Brush tip glow only
 }
 
-// MARK: - Lensient Effects Controller
+// MARK: - Spring Physics
+struct SpringValue {
+    var current: Float
+    var target: Float
+    var velocity: Float = 0
+    let stiffness: Float
+    let damping: Float
+    
+    init(_ initial: Float, stiffness: Float = 800, damping: Float = 0.9) {
+        self.current = initial
+        self.target = initial
+        self.stiffness = stiffness
+        self.damping = damping
+    }
+    
+    mutating func step(dt: Float) {
+        let displacement = target - current
+        let springForce = displacement * stiffness
+        velocity = (velocity + springForce * dt) * damping
+        current += velocity * dt
+    }
+    
+    mutating func set(_ value: Float) {
+        target = value
+    }
+    
+    mutating func snap(_ value: Float) {
+        current = value
+        target = value
+        velocity = 0
+    }
+}
+
+// MARK: - Controller
 @MainActor
 final class LensientEffectsController: ObservableObject {
     static let shared = LensientEffectsController()
     
-    // Published state
     @Published private(set) var state: ShimmerState = .hidden
-    @Published var opacity: Float = 0.0
-    @Published var centerX: Float = 0.0
-    @Published var centerY: Float = 0.0
-    @Published var rectangleAmount: Float = 0.0
-    @Published var rectWidth: Float = 0.0
-    @Published var rectHeight: Float = 0.0
     
-    private(set) var viewSize: CGSize = .zero
-    private var animationTimer: Timer?
+    // Animated values
+    var opacity = SpringValue(0, stiffness: 1200, damping: 0.85)
+    var centerX = SpringValue(0, stiffness: 1500, damping: 0.92)  // Fast follow
+    var centerY = SpringValue(0, stiffness: 1500, damping: 0.92)
+    var trackingAmount = SpringValue(0, stiffness: 2000, damping: 0.85)  // FAST transition to hide fullscreen
+    var particleRadius = SpringValue(120, stiffness: 800, damping: 0.9)  // Bigger default
+    
+    private(set) var viewSize: CGSize = .zero  // In PIXELS (drawable size)
+    private(set) var scaleFactor: CGFloat = 2.0  // Retina scale
     private(set) var startTime: CFTimeInterval = 0
+    private var lastFrameTime: CFTimeInterval = 0
+    private var animationTimer: Timer?
     
-    // Targets for animation
-    private var opacityTarget: Float = 0.0
-    private var centerXTarget: Float = 0.0
-    private var centerYTarget: Float = 0.0
-    
-    // Shimmer colors - balanced with more blue/green/teal, less yellow
+    // Google colors
     let shimmerColors: [SIMD3<Float>] = [
-        SIMD3<Float>(0.957, 0.176, 0.149),  // Red
-        SIMD3<Float>(0.027, 0.431, 1.000),  // Blue
-        SIMD3<Float>(0.043, 0.800, 0.380),  // Green
-        SIMD3<Float>(0.000, 0.800, 0.800),  // Teal/Cyan
-        SIMD3<Float>(0.400, 0.200, 0.900),  // Purple
-        SIMD3<Float>(0.027, 0.531, 1.000),  // Light Blue
-        SIMD3<Float>(0.043, 0.900, 0.500),  // Bright Green
-        SIMD3<Float>(0.800, 0.500, 0.100)   // Soft Orange (less yellow)
+        SIMD3<Float>(0.267, 0.129, 0.588),  // Purple
+        SIMD3<Float>(0.027, 0.224, 1.000),  // Blue
+        SIMD3<Float>(0.043, 0.518, 0.129),  // Green
+        SIMD3<Float>(1.000, 0.698, 0.000),  // Yellow
+        SIMD3<Float>(0.933, 0.314, 0.278),  // Red
+        SIMD3<Float>(0.027, 0.224, 1.000),
+        SIMD3<Float>(0.043, 0.518, 0.129),
+        SIMD3<Float>(0.267, 0.129, 0.588)
     ]
-    
-    let baseRadius: Float = 300.0
-    
-    // Dynamic radius based on screen size
-    var radius: Float {
-        // Large radius for full coverage like Android
-        let screenDimension = max(Float(viewSize.width), Float(viewSize.height))
-        return screenDimension * 0.5
-    }
     
     private init() {
         startTime = CACurrentMediaTime()
-    }
-    
-    func setViewSize(_ size: CGSize) {
-        viewSize = size
-        if centerX == 0 && centerY == 0 {
-            centerX = Float(size.width) * 0.5
-            centerY = Float(size.height) * 0.5
-            centerXTarget = centerX
-            centerYTarget = centerY
+        lastFrameTime = startTime
+        // Initialize viewSize from main screen immediately
+        if let screen = NSScreen.main {
+            let backing = screen.backingScaleFactor
+            scaleFactor = backing
+            viewSize = CGSize(width: screen.frame.width * backing, height: screen.frame.height * backing)
         }
     }
     
+    func setViewSize(_ size: CGSize, scale: CGFloat = 2.0) {
+        viewSize = size  // This should be drawable size (pixels)
+        scaleFactor = scale
+    }
+    
+    /// Show fullscreen shimmer on trigger
     func showIdle() {
         state = .idle
-        centerXTarget = Float(viewSize.width) * 0.5
-        centerYTarget = Float(viewSize.height) * 0.5
-        centerX = centerXTarget
-        centerY = centerYTarget
-        // Instant appear - start at full opacity immediately
-        opacity = 0.6
-        opacityTarget = 0.6
+        startTime = CACurrentMediaTime()
+        lastFrameTime = startTime
+        
+        opacity.snap(0.7)
+        trackingAmount.snap(0)  // Fullscreen mode
+        
         startAnimation()
     }
     
+    /// Transition to brush tip glow - fullscreen disappears, only tip glow remains
     func startTracking(at point: CGPoint) {
         state = .tracking
-        centerXTarget = Float(point.x)
-        centerYTarget = Float(point.y)
+        
+        // Convert SwiftUI points to Metal pixels
+        // SwiftUI: Y=0 at top, in points
+        // Metal: Y=0 at bottom, in pixels
+        let pixelX = Float(point.x) * Float(scaleFactor)
+        let pixelY = Float(viewSize.height) - (Float(point.y) * Float(scaleFactor))
+        
+        // Snap position to touch point immediately
+        centerX.snap(pixelX)
+        centerY.snap(pixelY)
+        
+        // INSTANT transition: fullscreen vanishes, only tip glow
+        trackingAmount.snap(1.0)  // SNAP = instant, no animation!
+        particleRadius.snap(60)   // 60px - nice visible size
+        opacity.snap(0.95)
+        
+        startAnimation()  // Ensure animation loop is running
     }
     
+    /// Update brush tip position while drawing
     func updateTracking(at point: CGPoint) {
         guard state == .tracking else { return }
-        centerXTarget = Float(point.x)
-        centerYTarget = Float(point.y)
+        // Convert SwiftUI points to Metal pixels
+        let pixelX = Float(point.x) * Float(scaleFactor)
+        let pixelY = Float(viewSize.height) - (Float(point.y) * Float(scaleFactor))
+        // SNAP for instant follow - no spring lag!
+        centerX.snap(pixelX)
+        centerY.snap(pixelY)
     }
     
+    /// Show selection glow (optional - can keep tip glow)
     func showSelection(rect: CGRect) {
-        state = .selection
-        centerXTarget = Float(rect.midX)
-        centerYTarget = Float(rect.midY)
-        rectWidth = Float(rect.width)
-        rectHeight = Float(rect.height)
-        rectangleAmount = 1.0
+        // Keep tracking mode, just update position
+        // Convert SwiftUI points to Metal pixels
+        let pixelX = Float(rect.midX) * Float(scaleFactor)
+        let pixelY = Float(viewSize.height) - (Float(rect.midY) * Float(scaleFactor))
+        centerX.set(pixelX)
+        centerY.set(pixelY)
+        particleRadius.set(Float(max(rect.width, rect.height)) * Float(scaleFactor) * 0.4)
     }
     
+    /// Hide everything - called when drawing ends
     func hide() {
         state = .hidden
-        opacityTarget = 0.0
-        startAnimation()
+        opacity.set(0)
     }
     
     var shaderTime: Float {
         Float(CACurrentMediaTime() - startTime)
     }
     
+    var baseRadius: Float {
+        Float(max(viewSize.width, viewSize.height)) * 0.5
+    }
+    
     private func startAnimation() {
         animationTimer?.invalidate()
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] timer in
             Task { @MainActor in
-                self?.tick()
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+                self.tick()
+                if self.state == .hidden && self.opacity.current < 0.01 {
+                    timer.invalidate()
+                    self.animationTimer = nil
+                }
             }
         }
     }
     
     private func tick() {
-        let opacitySpeed: Float = 0.15
-        let positionSpeed: Float = 0.02 // Very slow for natural lazy following
+        let now = CACurrentMediaTime()
+        let dt = Float(min(now - lastFrameTime, 1.0/30.0))
+        lastFrameTime = now
         
-        // Lerp towards targets
-        opacity += (opacityTarget - opacity) * opacitySpeed
-        centerX += (centerXTarget - centerX) * positionSpeed
-        centerY += (centerYTarget - centerY) * positionSpeed
-        
-        // Stop if hidden and faded out
-        if state == .hidden && opacity < 0.01 {
-            opacity = 0
-            animationTimer?.invalidate()
-            animationTimer = nil
-        }
-    }
-    
-    // Update center target for mouse following (called from hover)
-    func updateIdleCenter(at point: CGPoint) {
-        guard state == .idle else { return }
-        centerXTarget = Float(point.x)
-        centerYTarget = Float(point.y)
+        opacity.step(dt: dt)
+        centerX.step(dt: dt)
+        centerY.step(dt: dt)
+        trackingAmount.step(dt: dt)
+        particleRadius.step(dt: dt)
     }
 }

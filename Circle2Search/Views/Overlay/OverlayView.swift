@@ -382,36 +382,24 @@ struct OverlayView: View {
                     return
                 }
                 isDragging = false
+                
+                // Hide brush tip glow when finger is released (Android behavior)
+                Task { @MainActor in
+                    LensientEffectsController.shared.hide()
+                }
 
                 if !brushedSelectedText.isEmpty {
                     log.debug("OverlayView: Drag ended. Brushed text found: '\(brushedSelectedText)'. Confirming text selection.")
-                    
-                    let selectionBounds = activeSelectionWordRects.reduce(CGRect.null) { $0.union($1) }
-                    Task { @MainActor in
-                        if !selectionBounds.isNull {
-                            LensientEffectsController.shared.showSelection(rect: selectionBounds)
-                        }
-                    }
-                    
                     confirmSelection() 
                 } else if !self.path.isEmpty {
                     log.debug("OverlayView: Drag ended. No brushed text, but a path was drawn. Completing with path for area selection.")
                     
                     let pathBounds = self.path.boundingRect
-                    Task { @MainActor in
-                        LensientEffectsController.shared.showSelection(rect: pathBounds)
-                    }
-                    
                     let pathToReturn = self.path
                     resetAllSelectionStates()
                     completion(pathToReturn, nil, pathBounds)
                 } else {
                     log.debug("OverlayView: Drag ended. No brushed text and no significant path drawn. Resetting.")
-                    
-                    Task { @MainActor in
-                        LensientEffectsController.shared.hide()
-                    }
-                    
                     completion(nil, nil, nil)
                     resetAllSelectionStates()
                 }
