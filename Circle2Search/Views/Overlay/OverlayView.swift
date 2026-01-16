@@ -47,7 +47,9 @@ struct RippleEffect<T: Equatable>: ViewModifier {
 }
 
 struct OverlayView: View {
-    // Define SelectableWord and SelectionHandle at the top of OverlayView struct
+    
+    // MARK: - Nested Types
+    
     struct SelectableWord: Identifiable, Equatable {
         let id = UUID()
         let text: String
@@ -59,15 +61,17 @@ struct OverlayView: View {
     }
     enum SelectionHandle { case start, end, none }
 
-    @ObservedObject var overlayManager: OverlayManager // Inject the manager
+    
+    // MARK: - Properties
+    
+    @ObservedObject var overlayManager: OverlayManager
     var backgroundImage: CGImage?
-    // detailedTextRegions now comes from overlayManager.detailedTextRegions
-    @State private var path = Path()
-    @State private var drawingPoints: [CGPoint] = [] // Keep track for potential analysis/smoothing
-    @State private var brushedSelectedText: String = "" // NEW: For the precise brushed text
-    @State private var activeSelectionWordRects: [CGRect] = [] // RENAMED: For clarity, as it will now store word/segment bounding boxes
-    @State private var selectedTextIndices: Set<Int> = [] // <-- ADDED: To track selected text
-    @State private var hoveredTextIndex: Int? = nil // NEW: For hover effect
+    @State var path = Path()
+    @State var drawingPoints: [CGPoint] = [] // Keep track for potential analysis/smoothing
+    @State var brushedSelectedText: String = "" // NEW: For the precise brushed text
+    @State var activeSelectionWordRects: [CGRect] = [] // RENAMED: For clarity, as it will now store word/segment bounding boxes
+    @State var selectedTextIndices: Set<Int> = [] // <-- ADDED: To track selected text
+    @State var hoveredTextIndex: Int? = nil // NEW: For hover effect
     @State private var showSearchButton = false // For confirming drag selection
     @Binding var showOverlay: Bool // Use binding to allow dismissal from here
     var completion: (Path?, String?, CGRect?) -> Void // Path is nil if cancelled, String? for brushed text, CGRect? for selection bounds
@@ -83,43 +87,43 @@ struct OverlayView: View {
     @State private var startDate = Date()
 
     // Gesture state
-    @State private var isDragging = false
+    @State var isDragging = false
 
     // ESC key monitor
-    @State private var escapeEventMonitor: Any?
+    @State var escapeEventMonitor: Any?
 
     @FocusState private var isViewFocused: Bool
 
     // Animation state
     @State private var glowOpacity: Double = 0.0
     @State private var glowScale: CGFloat = 1.0
-    @State private var lastDrawingPoint: CGPoint?
+    @State var lastDrawingPoint: CGPoint?
     @State private var drawingAnimation: Animation?
 
     // Add new state variables for selection handles
-    @State private var selectionStartHandle: CGPoint?
-    @State private var selectionEndHandle: CGPoint?
-    @State private var isDraggingHandle: Bool = false // True if a selection handle is being dragged
-    @State private var draggedHandleType: SelectionHandle = .none // Which handle is being dragged
-    @State private var selectedTextRange: TextSelectionRange?
+    @State var selectionStartHandle: CGPoint?
+    @State var selectionEndHandle: CGPoint?
+    @State var isDraggingHandle: Bool = false // True if a selection handle is being dragged
+    @State var draggedHandleType: SelectionHandle = .none // Which handle is being dragged
+    @State var selectedTextRange: TextSelectionRange?
     
     // State for handle-based selection refinement
-    @State private var isHandleSelectionActive: Bool = false
-    @State private var startHandleWordGlobalIndex: Int? // Global index in allSelectableWords
-    @State private var endHandleWordGlobalIndex: Int?   // Global index in allSelectableWords
+    @State var isHandleSelectionActive: Bool = false
+    @State var startHandleWordGlobalIndex: Int? // Global index in allSelectableWords
+    @State var endHandleWordGlobalIndex: Int?   // Global index in allSelectableWords
     // Screen rects for drawing the start and end handles accurately
-    @State private var currentSelectionStartHandleRect: CGRect? 
-    @State private var currentSelectionEndHandleRect: CGRect?  
+    @State var currentSelectionStartHandleRect: CGRect? 
+    @State var currentSelectionEndHandleRect: CGRect?  
     // All words forming the current selection controlled by handles
-    @State private var currentHandleSelectionRects: [CGRect] = [] 
-    @State private var textForCurrentHandleSelection: String = ""
+    @State var currentHandleSelectionRects: [CGRect] = [] 
+    @State var textForCurrentHandleSelection: String = ""
     
     // Ripple effect state
-    @State private var rippleOrigin: CGPoint = .zero
-    @State private var rippleTrigger: Int = 0
+    @State var rippleOrigin: CGPoint = .zero
+    @State var rippleTrigger: Int = 0
 
     // Processed list of all words with their properties
-    @State private var allSelectableWords: [SelectableWord] = []
+    @State var allSelectableWords: [SelectableWord] = []
 
     // ADDED: Struct for text selection range to conform to Equatable
     struct TextSelectionRange: Equatable {
@@ -134,7 +138,9 @@ struct OverlayView: View {
     private let androidStrokeWidth: CGFloat = 6.0
     private let androidStrokeColor = Color.white
     
-    // Extracted Drawing Canvas Layer - Android Circle to Search style
+    // MARK: - View Layers
+    
+    /// Drawing canvas layer with Android Circle to Search style brush
     private var drawingCanvasLayer: some View {
         GeometryReader { canvasGeometryProxy in 
             Canvas { context, size in 
@@ -235,6 +241,8 @@ struct OverlayView: View {
         .allowsHitTesting(false)
     }
     
+    // MARK: - Body
+    
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !overlayManager.isWindowActuallyVisible)) { timeline in
             GeometryReader { geometry in
@@ -311,9 +319,9 @@ struct OverlayView: View {
         .background(TransparentWindowView())
     }
 
-    // Separate function for ESC key monitoring setup
+    // MARK: - Lifecycle
+    
     func setupEscapeKeyMonitor() {
-        // Use a local monitor to avoid capturing all system key events
         // Check if a monitor already exists to avoid adding multiple
         if escapeEventMonitor == nil {
             escapeEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event -> NSEvent? in
@@ -338,7 +346,8 @@ struct OverlayView: View {
     }
     // --------------------------------------------
 
-    // MODIFIED: Changed from var to func to accept canvasSize
+    // MARK: - Gestures
+    
     func dragGesture(canvasSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .local)
             .onChanged { value in
@@ -505,7 +514,8 @@ struct OverlayView: View {
         }
     }
 
-    // Called when the user confirms the selection (e.g., clicks the button)
+    // MARK: - Selection Logic
+    
     func confirmSelection() {
         let textToSend = isHandleSelectionActive ? textForCurrentHandleSelection : brushedSelectedText
         let selectionBounds = activeSelectionWordRects.reduce(CGRect.null) { $0.union($1) }
@@ -627,7 +637,8 @@ struct OverlayView: View {
         context.stroke(handlePath, with: .color(.white), lineWidth: 1)
     }
     
-    // Add helper function for CGPoint distance calculation
+    // MARK: - Helpers
+    
     private func distance(_ p1: CGPoint, _ p2: CGPoint) -> CGFloat {
         let dx = p2.x - p1.x
         let dy = p2.y - p1.y

@@ -1,22 +1,5 @@
 import Foundation
 
-// Define a structure to hold all parameters for the new search function
-struct LensSearchParameters {
-    let imageData: Data
-    let imageName: String // e.g., "capture.jpg" or "capture.png"
-    let imageMimeType: String // e.g., "image/jpeg" or "image/png"
-    let imageDimensions: (width: Int, height: Int) // For "processed_image_dimensions"
-    let viewportDimensions: (width: Int, height: Int) // For vpw, vph URL params
-    let cookieHeader: String? // The full cookie string - now OPTIONAL
-
-    // Optional parameters with default values based on your example
-    let languageCode: String = "en"
-    let userAgent: String = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
-    let referer: String = "https://www.google.com/"
-    let origin: String = "https://www.google.com/"
-    let endpointParameter: String = "gsbubb" // ep=gsbubb
-}
-
 // Handles uploading image data to Google Lens endpoint
 class LensUploader {
     static let shared = LensUploader()

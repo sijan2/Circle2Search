@@ -22,7 +22,7 @@ class OverlayManager: ObservableObject {
     // Function to show the overlay
     func showOverlay(backgroundImage image: CGImage?, previousApp: NSRunningApplication?, completion: @escaping (Path?, String?, CGRect?) -> Void) {
         guard overlayWindow == nil else {
-            print("Overlay already shown.")
+            log.debug("Overlay already shown.")
             return
         }
 
@@ -32,14 +32,14 @@ class OverlayManager: ObservableObject {
 
         // Get screen details
         guard let screen = NSScreen.main else {
-            print("Error: Could not get main screen.")
+            log.error("Error: Could not get main screen.")
             completion(nil, nil, nil)
             return
         }
 
         // Ensure we actually received an image
         guard let validImage = image else {
-             print("OverlayManager: Received nil image for overlay.")
+             log.warning("OverlayManager: Received nil image for overlay.")
              completion(nil, nil, nil)
              return
         }
@@ -99,11 +99,11 @@ class OverlayManager: ObservableObject {
 
         // Attempt to make the hosting view the first responder
         // It's crucial that the view can accept first responder status.
-        print("OverlayManager: About to make hostingView first responder. Current firstResponder: \(String(describing: overlayWindow?.firstResponder))")
+        log.debug("OverlayManager: About to make hostingView first responder. Current firstResponder: \(String(describing: overlayWindow?.firstResponder))")
         let MFRSuccess = overlayWindow?.makeFirstResponder(hostingView)
-        print("OverlayManager: Attempted to make hostingView first responder. Success: \(String(describing: MFRSuccess)). Current firstResponder: \(String(describing: overlayWindow?.firstResponder))")
+        log.debug("OverlayManager: Attempted to make hostingView first responder. Success: \(String(describing: MFRSuccess)). Current firstResponder: \(String(describing: overlayWindow?.firstResponder))")
         if MFRSuccess == false {
-            print("OverlayManager: WARNING - Failed to make hostingView the first responder.")
+            log.warning("OverlayManager: WARNING - Failed to make hostingView the first responder.")
             // Try making the window itself the first responder as a fallback
             // let windowMFRSuccess = overlayWindow?.makeFirstResponder(overlayWindow)
             // print("OverlayManager: Attempted to make overlayWindow first responder. Success: \(windowMFRSuccess). Current firstResponder: \(String(describing: overlayWindow?.firstResponder))")
@@ -113,25 +113,25 @@ class OverlayManager: ObservableObject {
         // This might be redundant if makeKeyAndOrderFront does it, but can be a fallback.
         // NSApp.activate(ignoringOtherApps: true)
 
-        print("Overlay window shown with SwiftUI view.")
+        log.info("Overlay window shown with SwiftUI view.")
 
         // Key-Value Observing for window visibility
         self.visibilityObservation = overlayWindow?.observe(\.isVisible, options: [.old, .new]) { [weak self] window, change in
             guard let isVisible = change.newValue else { return }
             if self?.isWindowActuallyVisible != isVisible {
-                print("OverlayManager: Window visibility changed. Is visible: \(isVisible)")
+                log.debug("OverlayManager: Window visibility changed. Is visible: \(isVisible)")
                 self?.isWindowActuallyVisible = isVisible
                 if isVisible {
-                    print("OverlayManager: Window is visible (unoccluded). Resuming Metal rendering.")
+                    log.debug("OverlayManager: Window is visible (unoccluded). Resuming Metal rendering.")
                     self?.shouldPauseMetalRendering = false
                     // If the app is active and window becomes visible, try to restore focus.
                     // This handles cases where the window might have lost key status while occluded.
                     if NSApp.isActive {
-                        print("OverlayManager: App is active, restoring focus due to KVO visibility change.")
+                        log.debug("OverlayManager: App is active, restoring focus due to KVO visibility change.")
                         self?.restoreFocusToOverlay() 
                     }
                 } else {
-                    print("OverlayManager: Window is NOT visible (occluded). Pausing Metal rendering.")
+                    log.debug("OverlayManager: Window is NOT visible (occluded). Pausing Metal rendering.")
                     // self?.shouldPauseMetalRendering = true
                 }
             }
@@ -140,7 +140,7 @@ class OverlayManager: ObservableObject {
 
     // Internal handler called by OverlayView's completion callback
     private func handleSelectionCompletion(path: Path?, brushedText: String?, selectionRect: CGRect?) {
-        print("OverlayManager handling completion. Path received: \(path != nil), Brushed Text: \(brushedText ?? "nil"), SelectionRect: \(String(describing: selectionRect))")
+        log.debug("OverlayManager handling completion. Path received: \(path != nil), Brushed Text: \(brushedText ?? "nil"), SelectionRect: \(String(describing: selectionRect))")
         
         // No longer need to combine query from indices here; CaptureController gets the direct text.
         // The `currentDetailedRegions` (previously `currentDetectedTexts`) were used for this combining step.
@@ -148,7 +148,7 @@ class OverlayManager: ObservableObject {
         
         currentCompletion?(path, brushedText, selectionRect) // Pass path, brushedText, and selectionRect along
 
-        print("OverlayManager: handleSelectionCompletion finished. Overlay remains visible for further interaction.")
+        log.debug("OverlayManager: handleSelectionCompletion finished. Overlay remains visible for further interaction.")
     }
 
     // Public function to dismiss the overlay externally if needed
@@ -162,7 +162,7 @@ class OverlayManager: ObservableObject {
             return 
         }
 
-        print("Dismissing overlay window...")
+        log.info("Dismissing overlay window...")
         Task { @MainActor in // Dispatch to main actor
             ResultPanel.shared.hide() // Hide the result panel when the overlay is dismissed
         }
@@ -176,7 +176,7 @@ class OverlayManager: ObservableObject {
          })
 
         if currentCompletion != nil {
-            print("Dismiss triggered before completion - signalling cancellation.")
+            log.debug("Dismiss triggered before completion - signalling cancellation.")
             currentCompletion?(nil, nil, nil)
             currentCompletion = nil 
         }
@@ -187,50 +187,50 @@ class OverlayManager: ObservableObject {
         // Delay slightly to allow workspace transition to settle
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in // 100ms delay
             guard let self = self, let window = self.overlayWindow, let view = self.overlayContentView, self.isOverlayVisible else {
-                print("OverlayManager: restoreFocusToOverlay (delayed) - Overlay not visible or window/view not set.")
+                log.debug("OverlayManager: restoreFocusToOverlay (delayed) - Overlay not visible or window/view not set.")
                 return
             }
 
-            print("OverlayManager: Attempting to restore focus (delayed). Current App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
-            print("OverlayManager: OverlayWindow canBecomeKey: \(window.canBecomeKey), canBecomeMain: \(window.canBecomeMain)")
+            log.debug("OverlayManager: Attempting to restore focus (delayed). Current App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
+            log.debug("OverlayManager: OverlayWindow canBecomeKey: \(window.canBecomeKey), canBecomeMain: \(window.canBecomeMain)")
 
             // Forcefully activate our application first
-            print("OverlayManager: (Delayed) Activating app ignoring others.")
+            log.debug("OverlayManager: (Delayed) Activating app ignoring others.")
             NSApp.activate(ignoringOtherApps: true)
             
-            print("OverlayManager: Before makeKeyAndOrderFront/orderFrontRegardless (delayed). NSApp.isActive: \(NSApp.isActive), App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
+            log.debug("OverlayManager: Before makeKeyAndOrderFront/orderFrontRegardless (delayed). NSApp.isActive: \(NSApp.isActive), App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
             window.makeKeyAndOrderFront(nil) // Try to make it key and bring to front
             window.orderFrontRegardless() // More forceful way to bring window to front
-            print("OverlayManager: After makeKeyAndOrderFront/orderFrontRegardless (delayed). NSApp.isActive: \(NSApp.isActive), App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
+            log.debug("OverlayManager: After makeKeyAndOrderFront/orderFrontRegardless (delayed). NSApp.isActive: \(NSApp.isActive), App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
 
             // Defer making first responder slightly to allow window key status to settle
             // This inner async is likely still beneficial
             DispatchQueue.main.async {
                 if window.isKeyWindow {
-                    print("OverlayManager: Window is key (delayed), attempting to make hostingView first responder.")
+                    log.debug("OverlayManager: Window is key (delayed), attempting to make hostingView first responder.")
                     if window.makeFirstResponder(view) {
-                        print("OverlayManager: restoreFocusToOverlay - Successfully made hostingView first responder (delayed async).")
+                        log.debug("OverlayManager: restoreFocusToOverlay - Successfully made hostingView first responder (delayed async).")
                     } else {
-                        print("OverlayManager: restoreFocusToOverlay - WARNING - Failed to make hostingView first responder (delayed async).")
+                        log.warning("OverlayManager: restoreFocusToOverlay - WARNING - Failed to make hostingView first responder (delayed async).")
                         if window.makeFirstResponder(window) {
-                            print("OverlayManager: restoreFocusToOverlay - Successfully made KeyAcceptingWindow first responder (delayed async fallback).")
+                            log.debug("OverlayManager: restoreFocusToOverlay - Successfully made KeyAcceptingWindow first responder (delayed async fallback).")
                         } else {
-                            print("OverlayManager: restoreFocusToOverlay - WARNING - Failed to make KeyAcceptingWindow first responder (delayed async fallback).")
+                            log.warning("OverlayManager: restoreFocusToOverlay - WARNING - Failed to make KeyAcceptingWindow first responder (delayed async fallback).")
                         }
                     }
                 } else {
-                    print("OverlayManager: restoreFocusToOverlay - Window did NOT become key (delayed), not attempting to make first responder.")
-                    print("OverlayManager: One final attempt to activate and make key (delayed).")
+                    log.warning("OverlayManager: restoreFocusToOverlay - Window did NOT become key (delayed), not attempting to make first responder.")
+                    log.debug("OverlayManager: One final attempt to activate and make key (delayed).")
                     NSApp.activate(ignoringOtherApps: true)
                     window.makeKeyAndOrderFront(nil)
                     window.orderFrontRegardless()
-                    print("OverlayManager: After final makeKeyAndOrderFront attempt (delayed). App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
+                    log.debug("OverlayManager: After final makeKeyAndOrderFront attempt (delayed). App KeyWindow: \(String(describing: NSApp.keyWindow)), OverlayWindow isKey: \(window.isKeyWindow)")
                     if window.isKeyWindow && window.makeFirstResponder(view) {
-                        print("OverlayManager: restoreFocusToOverlay - Success on final attempt (delayed async).")
+                        log.debug("OverlayManager: restoreFocusToOverlay - Success on final attempt (delayed async).")
                     } else if window.isKeyWindow && window.makeFirstResponder(window) {
-                        print("OverlayManager: restoreFocusToOverlay - KeyAcceptingWindow success on final attempt (delayed async).")
+                        log.debug("OverlayManager: restoreFocusToOverlay - KeyAcceptingWindow success on final attempt (delayed async).")
                     } else {
-                        print("OverlayManager: restoreFocusToOverlay - All attempts to restore focus failed (delayed).")
+                        log.warning("OverlayManager: restoreFocusToOverlay - All attempts to restore focus failed (delayed).")
                     }
                 }
             }
@@ -259,11 +259,11 @@ class OverlayManager: ObservableObject {
              self.isOverlayVisible = false // Ensure state reflects reality
              self.isWindowActuallyVisible = false // Ensure visibility state is also reset
             //  self.shouldPauseMetalRendering = true // Pause rendering when overlay is cleaned up
-             print("Overlay window cleaned up.")
+             log.info("Overlay window cleaned up.")
 
              // --- Restore focus to the previous application --- 
              if let appToReactivate = self.previousActiveApp {
-                 print("OverlayManager: Reactivating previous application: \(String(describing: appToReactivate.localizedName ?? "Unknown"))")
+                 log.info("OverlayManager: Reactivating previous application: \(String(describing: appToReactivate.localizedName ?? "Unknown"))")
                  appToReactivate.activate()
                  self.previousActiveApp = nil // Clear reference
              }
@@ -274,6 +274,6 @@ class OverlayManager: ObservableObject {
     private init() {} // Make initializer private for singleton
 
     deinit {
-        print("OverlayManager deallocated")
+        log.debug("OverlayManager deallocated")
     }
 }
