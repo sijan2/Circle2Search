@@ -102,6 +102,9 @@ class LensientRenderer: NSObject, MTKViewDelegate {
               let commandBuffer = commandQueue.makeCommandBuffer(),
               let controller = effectsController else { return }
         
+        // Priority 6: Step spring physics in sync with GPU frame
+        controller.tick()
+        
         let size = view.drawableSize
         
         // Update uniforms from controller's spring values

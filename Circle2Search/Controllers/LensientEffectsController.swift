@@ -63,7 +63,6 @@ final class LensientEffectsController: ObservableObject {
     private(set) var scaleFactor: CGFloat = 2.0  // Retina scale
     private(set) var startTime: CFTimeInterval = 0
     private var lastFrameTime: CFTimeInterval = 0
-    private var animationTimer: Timer?
     
     // Google colors
     let shimmerColors: [SIMD3<Float>] = [
@@ -101,8 +100,6 @@ final class LensientEffectsController: ObservableObject {
         
         opacity.snap(0.7)
         trackingAmount.snap(0)  // Fullscreen mode
-        
-        startAnimation()
     }
     
     /// Transition to brush tip glow - fullscreen disappears, only tip glow remains
@@ -123,8 +120,6 @@ final class LensientEffectsController: ObservableObject {
         trackingAmount.snap(1.0)  // SNAP = instant, no animation!
         particleRadius.snap(60)   // 60px - nice visible size
         opacity.snap(0.95)
-        
-        startAnimation()  // Ensure animation loop is running
     }
     
     /// Update brush tip position while drawing
@@ -163,24 +158,8 @@ final class LensientEffectsController: ObservableObject {
         Float(max(viewSize.width, viewSize.height)) * 0.5
     }
     
-    private func startAnimation() {
-        animationTimer?.invalidate()
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] timer in
-            Task { @MainActor in
-                guard let self = self else {
-                    timer.invalidate()
-                    return
-                }
-                self.tick()
-                if self.state == .hidden && self.opacity.current < 0.01 {
-                    timer.invalidate()
-                    self.animationTimer = nil
-                }
-            }
-        }
-    }
-    
-    private func tick() {
+    /// Called by Metal renderer each frame - drives spring physics in sync with GPU
+    func tick() {
         let now = CACurrentMediaTime()
         let dt = Float(min(now - lastFrameTime, 1.0/30.0))
         lastFrameTime = now

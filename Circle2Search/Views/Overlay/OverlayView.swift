@@ -62,7 +62,6 @@ struct OverlayView: View {
     // MARK: - Drawing State
     
     @State var path = Path()
-    @State var drawingPoints: [CGPoint] = []
     @State var lastDrawingPoint: CGPoint?
     @State var isDragging = false
     
@@ -130,12 +129,9 @@ struct OverlayView: View {
                 // - Round caps and joins
                 // - Slight blur for soft edge effect
                 if !path.isEmpty {
-                    // Outer glow layer (Android uses subtle shadow/glow)
-                    let glowStyle = StrokeStyle(lineWidth: androidStrokeWidth + 4, lineCap: .round, lineJoin: .round)
-                    context.drawLayer { glowContext in
-                        glowContext.addFilter(.blur(radius: 3))
-                        glowContext.stroke(path, with: .color(.white.opacity(0.3)), style: glowStyle)
-                    }
+                    // Priority 7: Lighter glow - double stroke instead of blur filter
+                    let glowStyle = StrokeStyle(lineWidth: androidStrokeWidth + 6, lineCap: .round, lineJoin: .round)
+                    context.stroke(path, with: .color(.white.opacity(0.2)), style: glowStyle)
                     
                     // Main stroke - solid white like Android
                     let mainStyle = StrokeStyle(lineWidth: androidStrokeWidth, lineCap: .round, lineJoin: .round)
@@ -224,72 +220,63 @@ struct OverlayView: View {
     // MARK: - Body
     
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !overlayManager.isWindowActuallyVisible)) { timeline in
-            GeometryReader { geometry in
-                ZStack {
-                    // Layer 1: Screenshot background with ripple effect
-                    if let bgImage = backgroundImage {
-                        Image(decorative: bgImage, scale: 1.0)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .modifier(RippleEffect(
-                                size: geometry.size,
-                                trigger: appearRippleTrigger
-                            ))
-                            .edgesIgnoringSafeArea(.all)
-                            .allowsHitTesting(false)
-                    }
-                    
-                    // Layer 2: Android-style vignette (dark edges, clear center)
-                    vignetteOverlay
+        GeometryReader { geometry in
+            ZStack {
+                // Layer 1: Screenshot background with ripple effect
+                if let bgImage = backgroundImage {
+                    Image(decorative: bgImage, scale: 1.0)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .modifier(RippleEffect(
+                            size: geometry.size,
+                            trigger: appearRippleTrigger
+                        ))
+                        .edgesIgnoringSafeArea(.all)
+                        .allowsHitTesting(false)
+                }
+                
+                // Layer 2: Android-style vignette (dark edges, clear center)
+                vignetteOverlay
 
-                    // Layer 3: Drawing canvas for scribble
-                    drawingCanvasLayer
+                // Layer 3: Drawing canvas for scribble
+                drawingCanvasLayer
 
-                    // Layer 4: Shimmer effect
-                    LensientMetalView(
-                        isPaused: $overlayManager.shouldPauseMetalRendering
-                    )
-                    .edgesIgnoringSafeArea(.all)
-                    .allowsHitTesting(false)
-                }
-                .onAppear {
-                    screenCenter = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
-                    // Trigger ripple immediately on appear
-                    appearRippleTrigger += 1
-                    Task { @MainActor in
-                        LensientEffectsController.shared.setViewSize(geometry.size)
-                        LensientEffectsController.shared.showIdle()
-                    }
-                }
-                .onChange(of: geometry.size) { _, newSize in
-                    screenCenter = CGPoint(x: newSize.width / 2, y: newSize.height / 2)
-                    Task { @MainActor in
-                        LensientEffectsController.shared.setViewSize(newSize)
-                    }
-                }
+                // Layer 4: Shimmer effect
+                LensientMetalView(
+                    isPaused: $overlayManager.shouldPauseMetalRendering
+                )
+                .edgesIgnoringSafeArea(.all)
+                .allowsHitTesting(false)
             }
             .onAppear {
-                setupEscapeKeyMonitor()
-                isViewFocused = true 
-            }
-            .onDisappear {
-                removeEscapeKeyMonitor()
-                Task { @MainActor in
-                    LensientEffectsController.shared.hide()
+                screenCenter = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                // Trigger ripple immediately on appear
+                appearRippleTrigger += 1
+                MainActor.assumeIsolated {
+                    LensientEffectsController.shared.showIdle()
                 }
             }
-            .onChange(of: showOverlay) { _, newValue in
-                if newValue == true {
-                    resetAllSelectionStates() 
-                    startDate = Date()
-                    Task { @MainActor in
-                        LensientEffectsController.shared.showIdle()
-                    }
-                } else {
-                    Task { @MainActor in
-                        LensientEffectsController.shared.hide()
-                    }
+        }
+        .onAppear {
+            setupEscapeKeyMonitor()
+            isViewFocused = true 
+        }
+        .onDisappear {
+            removeEscapeKeyMonitor()
+            MainActor.assumeIsolated {
+                LensientEffectsController.shared.hide()
+            }
+        }
+        .onChange(of: showOverlay) { _, newValue in
+            if newValue == true {
+                resetAllSelectionStates() 
+                startDate = Date()
+                MainActor.assumeIsolated {
+                    LensientEffectsController.shared.showIdle()
+                }
+            } else {
+                MainActor.assumeIsolated {
+                    LensientEffectsController.shared.hide()
                 }
             }
         }
@@ -358,19 +345,22 @@ struct OverlayView: View {
                     resetAllSelectionStates() // This will set isHandleSelectionActive = false
                     isDragging = true
                     path.move(to: value.startLocation)
-                    drawingPoints.append(value.startLocation)
+                    lastDrawingPoint = value.startLocation
                     
                     // Start tracking shimmer at touch point
-                    Task { @MainActor in
+                    MainActor.assumeIsolated {
                         LensientEffectsController.shared.startTracking(at: value.startLocation)
                     }
                 }
+                
+                // Priority 3: Distance threshold to reduce path complexity
+                if let last = lastDrawingPoint, distance(last, value.location) < 2.0 { return }
+                
                 path.addLine(to: value.location)
-                drawingPoints.append(value.location) 
                 lastDrawingPoint = value.location
                 
-                // Update shimmer position
-                Task { @MainActor in
+                // Update shimmer position - Priority 4: Direct call, no Task
+                MainActor.assumeIsolated {
                     LensientEffectsController.shared.updateTracking(at: value.location)
                 }
                 
@@ -384,7 +374,7 @@ struct OverlayView: View {
                 isDragging = false
                 
                 // Hide brush tip glow when finger is released (Android behavior)
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     LensientEffectsController.shared.hide()
                 }
 
@@ -406,79 +396,31 @@ struct OverlayView: View {
             }
     }
 
-    // NEW: Function for fine-grained text selection with throttling
+    // Optimized: Uses precomputed allSelectableWords instead of Vision API calls per drag
     func updateBrushedTextSelection(drawnPath: Path, canvasProxySize: CGSize) {
-        // Throttle updates to prevent excessive re-computation during fast drags
         let now = Date()
-        guard now.timeIntervalSince(lastSelectionUpdateTime) >= selectionUpdateThrottleInterval else {
-            return // Skip this update, too soon
-        }
+        guard now.timeIntervalSince(lastSelectionUpdateTime) >= selectionUpdateThrottleInterval else { return }
         lastSelectionUpdateTime = now
         
-        guard !drawnPath.isEmpty else {
-            if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
-            if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
-            return
-        }
-        let regions = overlayManager.detailedTextRegions
-        guard !regions.isEmpty else {
+        guard !drawnPath.isEmpty, !allSelectableWords.isEmpty else {
             if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
             if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
             return
         }
 
-        let brushPathBoundingBox = drawnPath.strokedPath(StrokeStyle(lineWidth: 15.0, lineCap: .round, lineJoin: .round)).cgPath.boundingBox
+        // Priority 2: Use simple boundingRect instead of expensive strokedPath().cgPath.boundingBox
+        let brushBounds = drawnPath.boundingRect.insetBy(dx: -15, dy: -15)
+        
         var newBrushedText = ""
         var newWordRects: [CGRect] = []
-        var needsSpace = false
-
-        for region in regions {
-            let recognizedTextObject = region.recognizedText
-            let fullString = recognizedTextObject.string
-            
-            let blockScreenRect = CGRect(
-                x: region.normalizedRect.origin.x * canvasProxySize.width,
-                y: (1 - region.normalizedRect.origin.y - region.normalizedRect.height) * canvasProxySize.height,
-                width: region.normalizedRect.width * canvasProxySize.width,
-                height: region.normalizedRect.height * canvasProxySize.height
-            )
-
-            if !brushPathBoundingBox.intersects(blockScreenRect) {
-                continue
+        
+        // Priority 1: Iterate precomputed words - NO Vision API calls!
+        for word in allSelectableWords {
+            if brushBounds.intersects(word.screenRect) {
+                if !newBrushedText.isEmpty { newBrushedText.append(" ") }
+                newBrushedText.append(word.text)
+                newWordRects.append(word.screenRect)
             }
-
-            var blockTextSelected = false
-            fullString.enumerateSubstrings(in: fullString.startIndex..<fullString.endIndex, options: .byWords) { (wordSubstring, wordSwiftRange, enclosingRange, stop) in
-                guard let word = wordSubstring else { return }
-                let wordNSRange = NSRange(wordSwiftRange, in: fullString) 
-                
-                do {
-                    if let wordObservation = try recognizedTextObject.boundingBox(for: wordSwiftRange) { 
-                        let wordNormalizedBox = wordObservation.boundingBox
-                        let wordScreenRect = CGRect(
-                            x: wordNormalizedBox.origin.x * canvasProxySize.width,
-                            y: (1 - wordNormalizedBox.origin.y - wordNormalizedBox.height) * canvasProxySize.height,
-                            width: wordNormalizedBox.width * canvasProxySize.width,
-                            height: wordNormalizedBox.height * canvasProxySize.height
-                        )
-                        
-                        if brushPathBoundingBox.intersects(wordScreenRect) {
-                            if needsSpace && !newBrushedText.isEmpty && !newBrushedText.hasSuffix(" ") {
-                                newBrushedText.append(" ")
-                            }
-                            newBrushedText.append(word)
-                            newWordRects.append(wordScreenRect)
-                            blockTextSelected = true
-                            needsSpace = true 
-                        }
-                    }
-                } catch {
-                    // print("Error getting bounding box for word '\(word)': \(error)")
-                }
-            }
-            if blockTextSelected {
-                needsSpace = true 
-            } 
         }
         
         if self.brushedSelectedText != newBrushedText {
@@ -545,7 +487,6 @@ struct OverlayView: View {
             
             // Clear brush-specific states
             self.path = Path()
-            self.drawingPoints = []
             // activeSelectionWordRects are now stored in currentHandleSelectionRects or were used
             
             log.debug("OverlayView: Confirmed. Handle selection active. Text: '\(self.textForCurrentHandleSelection)'")
@@ -568,7 +509,6 @@ struct OverlayView: View {
     private func resetAllSelectionStates() {
         isDragging = false
         path = Path()
-        drawingPoints = []
         brushedSelectedText = ""
         activeSelectionWordRects = []
         isHandleSelectionActive = false
@@ -578,7 +518,7 @@ struct OverlayView: View {
         currentSelectionEndHandleRect = nil
         currentHandleSelectionRects = []
         textForCurrentHandleSelection = ""
-        selectedTextIndices = [] // Ensure this is also reset if it was used by tap
+        selectedTextIndices = []
         hoveredTextIndex = nil
     }
 
@@ -644,7 +584,6 @@ struct OverlayView: View {
                             self.draggedHandleType = .start
                             self.isDragging = false // Explicitly stop brush dragging mode
                             self.path = Path() 
-                            self.drawingPoints = []
                             log.debug("HandleDrag: Started dragging START handle")
                             // No need to call updateSelectionViaHandleDrag here yet, wait for actual movement
                             return // Successfully started handle drag
@@ -657,7 +596,6 @@ struct OverlayView: View {
                             self.draggedHandleType = .end
                             self.isDragging = false // Explicitly stop brush dragging mode
                             self.path = Path()
-                            self.drawingPoints = []
                             log.debug("HandleDrag: Started dragging END handle")
                             return // Successfully started handle drag
                         }
