@@ -124,6 +124,14 @@ struct OverlayView: View {
 
     // Processed list of all words with their properties
     @State var allSelectableWords: [SelectableWord] = []
+    
+    // Throttling for selection updates (performance optimization)
+    @State private var lastSelectionUpdateTime: Date = .distantPast
+    private let selectionUpdateThrottleInterval: TimeInterval = 0.016 // ~60fps, 16ms
+    
+    // Throttling for hover updates (performance optimization)
+    @State private var lastHoverUpdateTime: Date = .distantPast
+    private let hoverUpdateThrottleInterval: TimeInterval = 0.033 // ~30fps, 33ms for hover
 
     // ADDED: Struct for text selection range to conform to Equatable
     struct TextSelectionRange: Equatable {
@@ -191,7 +199,7 @@ struct OverlayView: View {
                             let tappedWord = allSelectableWords[tappedGlobalIndex]
                             self.brushedSelectedText = tappedWord.text
                             self.activeSelectionWordRects = [tappedWord.screenRect] // For confirmSelection
-                            print("Tapped on word: \(tappedWord.text)")
+                            log.debug("Tapped on word: \(tappedWord.text)")
                             confirmSelection() // This will set up handle selection for the single tapped word
                         }
                     }
@@ -326,13 +334,13 @@ struct OverlayView: View {
         if escapeEventMonitor == nil {
             escapeEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event -> NSEvent? in
                 if event.keyCode == 53 { // 53 is the keycode for ESC
-                    print("ESC key pressed - Cancelling Overlay")
+                    log.debug("ESC key pressed - Cancelling Overlay")
                     cancelSelection()
                     return nil // Consume the event to prevent beeps/etc.
                 }
                 return event // Return other events unmodified
             }
-            print("OverlayView: Escape key monitor ADDED.")
+            log.debug("OverlayView: Escape key monitor ADDED.")
         }
     }
 
@@ -341,7 +349,7 @@ struct OverlayView: View {
         if let monitor = escapeEventMonitor {
             NSEvent.removeMonitor(monitor)
             escapeEventMonitor = nil
-            print("OverlayView: Escape key monitor REMOVED.")
+            log.debug("OverlayView: Escape key monitor REMOVED.")
         }
     }
     // --------------------------------------------
@@ -404,7 +412,7 @@ struct OverlayView: View {
                 isDragging = false
 
                 if !brushedSelectedText.isEmpty {
-                    print("OverlayView: Drag ended. Brushed text found: '\(brushedSelectedText)'. Confirming text selection.")
+                    log.debug("OverlayView: Drag ended. Brushed text found: '\(brushedSelectedText)'. Confirming text selection.")
                     
                     let selectionBounds = activeSelectionWordRects.reduce(CGRect.null) { $0.union($1) }
                     Task { @MainActor in
@@ -415,7 +423,7 @@ struct OverlayView: View {
                     
                     confirmSelection() 
                 } else if !self.path.isEmpty {
-                    print("OverlayView: Drag ended. No brushed text, but a path was drawn. Completing with path for area selection.")
+                    log.debug("OverlayView: Drag ended. No brushed text, but a path was drawn. Completing with path for area selection.")
                     
                     let pathBounds = self.path.boundingRect
                     Task { @MainActor in
@@ -426,7 +434,7 @@ struct OverlayView: View {
                     resetAllSelectionStates()
                     completion(pathToReturn, nil, pathBounds)
                 } else {
-                    print("OverlayView: Drag ended. No brushed text and no significant path drawn. Resetting.")
+                    log.debug("OverlayView: Drag ended. No brushed text and no significant path drawn. Resetting.")
                     
                     Task { @MainActor in
                         LensientEffectsController.shared.hide()
@@ -438,8 +446,15 @@ struct OverlayView: View {
             }
     }
 
-    // NEW: Function for fine-grained text selection
+    // NEW: Function for fine-grained text selection with throttling
     func updateBrushedTextSelection(drawnPath: Path, canvasProxySize: CGSize) {
+        // Throttle updates to prevent excessive re-computation during fast drags
+        let now = Date()
+        guard now.timeIntervalSince(lastSelectionUpdateTime) >= selectionUpdateThrottleInterval else {
+            return // Skip this update, too soon
+        }
+        lastSelectionUpdateTime = now
+        
         guard !drawnPath.isEmpty else {
             if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
             if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
@@ -573,11 +588,11 @@ struct OverlayView: View {
             self.drawingPoints = []
             // activeSelectionWordRects are now stored in currentHandleSelectionRects or were used
             
-            print("OverlayView: Confirmed. Handle selection active. Text: '\(self.textForCurrentHandleSelection)'")
+            log.debug("OverlayView: Confirmed. Handle selection active. Text: '\(self.textForCurrentHandleSelection)'")
         } else {
             isHandleSelectionActive = false
             resetAllSelectionStates() 
-            print("OverlayView: Confirmed. No text to activate handles.")
+            log.debug("OverlayView: Confirmed. No text to activate handles.")
         }
     }
 
@@ -607,21 +622,28 @@ struct OverlayView: View {
         hoveredTextIndex = nil
     }
 
+    // Optimized hover detection using precomputed allSelectableWords
     private func updateHoveredTextIndex(at location: CGPoint, in size: CGSize) {
-        let rects = overlayManager.detailedTextRegions
-        if !rects.isEmpty {
-            for (index, region) in rects.enumerated() {
-                let denormalizedRect = CGRect(
-                    x: region.normalizedRect.origin.x * size.width,
-                    y: (1 - region.normalizedRect.origin.y - region.normalizedRect.height) * size.height, // Adjust for bottom-left origin
-                    width: region.normalizedRect.width * size.width,
-                    height: region.normalizedRect.height * size.height
-                )
-                if denormalizedRect.contains(location) {
-                    hoveredTextIndex = index
-                    return
+        // Throttle hover updates to ~30fps for performance
+        let now = Date()
+        guard now.timeIntervalSince(lastHoverUpdateTime) >= hoverUpdateThrottleInterval else {
+            return
+        }
+        lastHoverUpdateTime = now
+        
+        // Use precomputed word rects for O(n) lookup with cached coordinates
+        // This avoids recalculating screen rects from normalized each frame
+        for word in allSelectableWords {
+            if word.screenRect.contains(location) {
+                if hoveredTextIndex != word.globalIndex {
+                    hoveredTextIndex = word.globalIndex
                 }
+                return
             }
+        }
+        
+        // Fallback to nil if no word found
+        if hoveredTextIndex != nil {
             hoveredTextIndex = nil
         }
     }
@@ -663,7 +685,7 @@ struct OverlayView: View {
                             self.isDragging = false // Explicitly stop brush dragging mode
                             self.path = Path() 
                             self.drawingPoints = []
-                            print("HandleDrag: Started dragging START handle")
+                            log.debug("HandleDrag: Started dragging START handle")
                             // No need to call updateSelectionViaHandleDrag here yet, wait for actual movement
                             return // Successfully started handle drag
                         }
@@ -676,7 +698,7 @@ struct OverlayView: View {
                             self.isDragging = false // Explicitly stop brush dragging mode
                             self.path = Path()
                             self.drawingPoints = []
-                            print("HandleDrag: Started dragging END handle")
+                            log.debug("HandleDrag: Started dragging END handle")
                             return // Successfully started handle drag
                         }
                     }
@@ -897,7 +919,7 @@ struct OverlayView: View {
                         currentGlobalIndex += 1
                     }
                 } catch {
-                    print("Error getting bounding box for word range \(wordSwiftRange): \(error)")
+                    log.warning("Error getting bounding box for word range \(wordSwiftRange): \(error)")
                 }
             }
         }
