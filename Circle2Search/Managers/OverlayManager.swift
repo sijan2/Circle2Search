@@ -12,6 +12,11 @@ class OverlayManager: ObservableObject {
     @Published var isWindowActuallyVisible = true
     @Published var shouldPauseMetalRendering: Bool = false
     @Published var detailedTextRegions: [DetailedTextRegion] = [] // Published for async OCR updates
+    @Published var isResultPanelVisible: Bool = false  // Track if result panel popover is open
+    
+    /// Set to true when popover closes via user click. First tap after close clears this flag,
+    /// second tap actually exits. This prevents the same click from both closing popover AND exiting.
+    var needsConfirmTapToExit: Bool = false
 
     private var overlayWindow: KeyAcceptingWindow?
     var overlayContentView: NSView? // Store the content view (internal access is default)

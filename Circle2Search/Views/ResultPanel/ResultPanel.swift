@@ -10,6 +10,7 @@ class ResultPanel: NSObject, NSPopoverDelegate {
     private var popover: NSPopover?
     private var hostingController: NSHostingController<ResultDisplayView>?
     private var webViewModel: WebViewModel! // Will be initialized before first use
+    private var isClosingForReposition: Bool = false  // Track if closing for repositioning vs user action
     
     // Store the positioning info for the popover
     private var currentSelectionRect: CGRect?
@@ -47,6 +48,7 @@ class ResultPanel: NSObject, NSPopoverDelegate {
     func hide() {
         guard let popover = popover else { return }
         
+        OverlayManager.shared.isResultPanelVisible = false
         popover.performClose(nil)
         self.popover = nil
         self.hostingController = nil
@@ -58,7 +60,9 @@ class ResultPanel: NSObject, NSPopoverDelegate {
         // Always close existing popover - we need to reposition for new selection
         if popover != nil {
             print("ResultPanel: Closing existing popover to reposition at new selection.")
+            isClosingForReposition = true  // Mark as programmatic close
             popover?.close()
+            isClosingForReposition = false
             popover = nil
             hostingController = nil
         }
@@ -93,6 +97,7 @@ class ResultPanel: NSObject, NSPopoverDelegate {
         popover?.delegate = self
         
         showPopover()
+        OverlayManager.shared.isResultPanelVisible = true
     }
     
     private func showPopover() {
@@ -163,7 +168,12 @@ class ResultPanel: NSObject, NSPopoverDelegate {
     // MARK: - NSPopoverDelegate
     
     func popoverDidClose(_ notification: Notification) {
-        print("ResultPanel: Popover did close (delegate).")
+        print("ResultPanel: Popover did close (delegate). isClosingForReposition=\(isClosingForReposition)")
+        OverlayManager.shared.isResultPanelVisible = false
+        // Only require tap confirmation for user-initiated close (not programmatic repositioning)
+        if !isClosingForReposition {
+            OverlayManager.shared.needsConfirmTapToExit = true
+        }
         // Don't nil out everything here - the popover might be closed temporarily
         // Only clean up if we explicitly called hide()
     }

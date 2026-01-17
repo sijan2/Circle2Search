@@ -160,15 +160,32 @@ struct OverlayView: View {
                     hoveredTextIndex = nil
                 }
             }
-            .gesture( 
+            .simultaneousGesture( 
                 TapGesture()
                     .onEnded { _ in
+                        log.debug("TAP detected! isResultPanelVisible=\(overlayManager.isResultPanelVisible), needsConfirmTapToExit=\(overlayManager.needsConfirmTapToExit)")
+                        
+                        // If popover just closed, this tap was the closing tap - clear flag and wait for next tap
+                        if overlayManager.needsConfirmTapToExit {
+                            log.debug("Clearing needsConfirmTapToExit - next tap will exit")
+                            overlayManager.needsConfirmTapToExit = false
+                            return
+                        }
+                        
+                        // When popover is closed and confirmed, ANY tap exits the overlay
+                        if !overlayManager.isResultPanelVisible {
+                            log.debug("Popover closed - tap exits overlay")
+                            cancelSelection()
+                            return
+                        }
+                        
+                        // When popover is OPEN: tap on word to select it (changes the search)
                         if let tappedGlobalIndex = hoveredTextIndex, tappedGlobalIndex < allSelectableWords.count {
                             let tappedWord = allSelectableWords[tappedGlobalIndex]
                             self.brushedSelectedText = tappedWord.text
-                            self.activeSelectionWordRects = [tappedWord.screenRect] // For confirmSelection
+                            self.activeSelectionWordRects = [tappedWord.screenRect]
                             log.debug("Tapped on word: \(tappedWord.text)")
-                            confirmSelection() // This will set up handle selection for the single tapped word
+                            confirmSelection()
                         }
                     }
             )

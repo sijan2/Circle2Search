@@ -152,7 +152,7 @@ final class LensientEffectsController: ObservableObject {
         // SNAP for instant transition (no flicker from spring animation)
         trackingAmount.snap(0)  // Back to fullscreen mode - instant
         saturation.snap(0)      // Monochrome - instant
-        opacity.snap(0.40)      // Subtle but visible - instant
+        opacity.snap(0.25)      // Subtle but visible - instant
     }
     
     /// Hide everything - called when ESC/popover closes
