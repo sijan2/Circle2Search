@@ -16,6 +16,7 @@ struct ShimmerUniforms {
     var baseRadius: Float
     var trackingAmount: Float
     var particleRadius: Float
+    var saturation: Float      // 0 = monochrome, 1 = full color
     var color0: SIMD4<Float>
     var color1: SIMD4<Float>
     var color2: SIMD4<Float>
@@ -121,6 +122,7 @@ class LensientRenderer: NSObject, MTKViewDelegate {
                 baseRadius: controller.baseRadius,
                 trackingAmount: controller.trackingAmount.current,
                 particleRadius: controller.particleRadius.current,
+                saturation: controller.saturation.current,
                 color0: SIMD4<Float>(colors[0], 0),
                 color1: SIMD4<Float>(colors[1], 0),
                 color2: SIMD4<Float>(colors[2], 0),

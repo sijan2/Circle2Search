@@ -43,7 +43,7 @@ public struct SwiftUIWebView: NSViewRepresentable {
 
     public func makeNSView(context: Context) -> WKWebView {
         webViewInstance.navigationDelegate = context.coordinator
-        webViewInstance.uiDelegate = context.coordinator // Optional: if you need to handle JS alerts, etc.
+        webViewInstance.uiDelegate = context.coordinator
         
         // Set a custom user-agent
         webViewInstance.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
@@ -51,51 +51,39 @@ public struct SwiftUIWebView: NSViewRepresentable {
         // Perform the initial load only if there's a valid URL
         if let url = URL(string: viewModel.link) {
             print("SwiftUIWebView makeNSView: Loading initial URL: \(viewModel.link)")
+            context.coordinator.lastLoadedLink = viewModel.link
             webViewInstance.load(URLRequest(url: url))
         } else {
             print("SwiftUIWebView makeNSView: Initial URL is invalid: \(viewModel.link)")
-            // Optionally load an error page or blank page
-            // webViewInstance.loadHTMLString("<html><body>Invalid URL</body></html>", baseURL: nil)
         }
         return webViewInstance
     }
 
     public func updateNSView(_ nsView: WKWebView, context: Context) {
-        guard let newTargetURL = URL(string: viewModel.link) else {
-            print("SwiftUIWebView updateNSView: New target URL string is invalid: \(viewModel.link)")
+        let newLink = viewModel.link
+        
+        // Quick exit if we already loaded this exact URL
+        if context.coordinator.lastLoadedLink == newLink {
             return
         }
         
-        let currentWebViewURL = nsView.url
-
-        // CAPTCHA/Sorry page loop prevention
-        if let currentHost = currentWebViewURL?.host, currentHost.contains("google.com"),
-           let currentPath = currentWebViewURL?.path, currentPath.contains("/sorry") {
-            // If the current page is a Google "sorry" page, and the target URL's host is also Google
-            // (implying viewModel.link is likely the original search), don't attempt to reload immediately.
-            // This helps prevent a loop if the viewModel.link hasn't changed to a new, unrelated URL.
-            if newTargetURL.host?.contains("google.com") == true {
-                 print("SwiftUIWebView updateNSView: On Google CAPTCHA page. Suppressing reload of Google target to prevent loop.")
-                 return
-            }
+        guard let newTargetURL = URL(string: newLink) else {
+            print("SwiftUIWebView updateNSView: Invalid URL: \(newLink)")
+            return
         }
         
-        // Condition: Load if webView has no URL yet, OR if its URL is different from the new target.
-        if currentWebViewURL == nil || currentWebViewURL != newTargetURL {
-            // Further check: if it's already loading the new target URL, don't issue another load command.
-            // This can happen if makeNSView just started a load, and updateNSView is called immediately after.
-            // However, nsView.isLoading might not be true yet if the load command was just issued.
-            // A robust check is tricky. The primary guard is `currentWebViewURL != newTargetURL`.
-            // If `nsView.url` is non-nil and matches `newTargetURL`, and `nsView.isLoading` is true, we definitely shouldn't reload.
-            if nsView.isLoading && currentWebViewURL == newTargetURL {
-                print("SwiftUIWebView updateNSView: Already loading target URL: \(newTargetURL.absoluteString)")
-            } else {
-                print("SwiftUIWebView updateNSView: Loading new or different URL: \(newTargetURL.absoluteString)")
-                nsView.load(URLRequest(url: newTargetURL))
-            }
-        } else {
-            print("SwiftUIWebView updateNSView: Target URL \(newTargetURL.absoluteString) is same as current: \(currentWebViewURL?.absoluteString ?? "nil"). No action.")
+        // CAPTCHA/Sorry page loop prevention
+        if let currentHost = nsView.url?.host, currentHost.contains("google.com"),
+           let currentPath = nsView.url?.path, currentPath.contains("/sorry"),
+           newTargetURL.host?.contains("google.com") == true {
+            print("SwiftUIWebView updateNSView: On CAPTCHA page. Suppressing reload.")
+            return
         }
+        
+        // Load the new URL and track it
+        print("SwiftUIWebView updateNSView: Loading new URL: \(newLink)")
+        context.coordinator.lastLoadedLink = newLink
+        nsView.load(URLRequest(url: newTargetURL))
     }
 
     public func makeCoordinator() -> Coordinator {
@@ -105,7 +93,9 @@ public struct SwiftUIWebView: NSViewRepresentable {
 
 public extension SwiftUIWebView {
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        @ObservedObject var viewModel: WebViewModel // Ensure coordinator also observes if needed, or just holds a reference
+        @ObservedObject var viewModel: WebViewModel
+        /// Tracks the last URL we explicitly commanded the WebView to load
+        var lastLoadedLink: String?
 
         init(viewModel: WebViewModel) {
             self.viewModel = viewModel

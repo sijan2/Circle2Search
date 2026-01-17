@@ -55,41 +55,22 @@ class ResultPanel: NSObject, NSPopoverDelegate {
     }
 
     private func setupPopoverIfNeeded(initialURL: String, query: String) {
-        // If popover already exists, just update the content
-        if let existingPopover = popover, existingPopover.isShown, let existingHostingController = hostingController {
-            print("ResultPanel: Popover already shown. Updating URL and title.")
-            guard self.webViewModel != nil else {
-                print("Error: webViewModel is nil despite existing popover. Recreating.")
-                self.popover?.close()
-                self.popover = nil
-                self.hostingController = nil
-                return setupPopoverIfNeeded(initialURL: initialURL, query: query)
-            }
-
-            self.webViewModel.link = initialURL
-            
-            let updatedView = ResultDisplayView(
-                webViewModel: self.webViewModel,
-                queryText: query, 
-                onClose: { [weak self] in self?.hide() }
-            )
-            existingHostingController.rootView = updatedView
-            return
+        // Always close existing popover - we need to reposition for new selection
+        if popover != nil {
+            print("ResultPanel: Closing existing popover to reposition at new selection.")
+            popover?.close()
+            popover = nil
+            hostingController = nil
         }
         
-        // Close any existing popover before creating new one
-        popover?.close()
-        popover = nil
-        hostingController = nil
-        
-        print("ResultPanel: Setting up new NSPopover.")
+        print("ResultPanel: Creating popover at new position.")
 
-        // Initialize WebViewModel if needed
         let initialWidth: CGFloat = 360
         let initialHeight: CGFloat = 500
         self.currentPanelWidth = initialWidth
         self.currentPanelHeight = initialHeight
 
+        // Reuse WebViewModel if it exists (memory efficient), just update URL
         if self.webViewModel == nil {
             self.webViewModel = WebViewModel(link: initialURL)
         } else {
@@ -104,15 +85,13 @@ class ResultPanel: NSObject, NSPopoverDelegate {
         hostingController = NSHostingController(rootView: resultView)
         hostingController?.view.frame = NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight)
         
-        // Create the popover
         popover = NSPopover()
         popover?.contentSize = NSSize(width: initialWidth, height: initialHeight)
-        popover?.behavior = .semitransient // Allows interaction but closes on outside click
+        popover?.behavior = .semitransient // Closes on outside click - user's preference
         popover?.animates = true
         popover?.contentViewController = hostingController
         popover?.delegate = self
         
-        // Show the popover anchored to the selection
         showPopover()
     }
     

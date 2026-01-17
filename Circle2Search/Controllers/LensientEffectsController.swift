@@ -8,8 +8,9 @@ import Combine
 // MARK: - State
 enum ShimmerState: Int {
     case hidden = 0
-    case idle = 1        // Fullscreen shimmer
+    case idle = 1        // Fullscreen shimmer (colorful)
     case tracking = 2    // Brush tip glow only
+    case ambient = 3     // Subtle monochrome shimmer (post-brush, "still active" indicator)
 }
 
 // MARK: - Spring Physics
@@ -57,6 +58,7 @@ final class LensientEffectsController: ObservableObject {
     var centerX = SpringValue(0, stiffness: 1500, damping: 0.92)  // Fast follow
     var centerY = SpringValue(0, stiffness: 1500, damping: 0.92)
     var trackingAmount = SpringValue(0, stiffness: 2000, damping: 0.85)  // FAST transition to hide fullscreen
+    var saturation = SpringValue(1.0, stiffness: 600, damping: 0.9)  // 1 = colorful, 0 = monochrome
     var particleRadius = SpringValue(120, stiffness: 800, damping: 0.9)  // Bigger default
     
     private(set) var viewSize: CGSize = .zero  // In PIXELS (drawable size)
@@ -144,10 +146,20 @@ final class LensientEffectsController: ObservableObject {
         particleRadius.set(Float(max(rect.width, rect.height)) * Float(scaleFactor) * 0.4)
     }
     
-    /// Hide everything - called when drawing ends
+    /// Transition to subtle monochrome ambient mode - called when text is selected
+    func showAmbient() {
+        state = .ambient
+        // SNAP for instant transition (no flicker from spring animation)
+        trackingAmount.snap(0)  // Back to fullscreen mode - instant
+        saturation.snap(0)      // Monochrome - instant
+        opacity.snap(0.40)      // Subtle but visible - instant
+    }
+    
+    /// Hide everything - called when ESC/popover closes
     func hide() {
         state = .hidden
         opacity.set(0)
+        saturation.set(1.0)  // Reset to colorful for next use
     }
     
     var shaderTime: Float {
@@ -169,5 +181,6 @@ final class LensientEffectsController: ObservableObject {
         centerY.step(dt: dt)
         trackingAmount.step(dt: dt)
         particleRadius.step(dt: dt)
+        saturation.step(dt: dt)
     }
 }

@@ -16,6 +16,7 @@ struct ShimmerUniforms {
     float baseRadius;
     float trackingAmount;     // 0 = fullscreen shimmer, 1 = brush tip only
     float particleRadius;
+    float saturation;         // 0 = monochrome, 1 = full color
     float4 color0;
     float4 color1;
     float4 color2;
@@ -152,6 +153,11 @@ fragment float4 shimmer_fragment(VertexOut in [[stage_in]], constant ShimmerUnif
     // ============================================
     float fullscreenFade = pow(1.0 - tracking, 2.0);
     float4 result = fullscreenResult * fullscreenFade + tipResult;
+    
+    // Apply desaturation (saturation: 0 = grayscale, 1 = full color)
+    float gray = dot(result.rgb, float3(0.299, 0.587, 0.114));
+    result.rgb = mix(float3(gray), result.rgb, u.saturation);
+    
     result *= u.opacity;
     
     return result;
