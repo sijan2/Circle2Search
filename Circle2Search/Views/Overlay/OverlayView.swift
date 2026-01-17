@@ -64,6 +64,7 @@ struct OverlayView: View {
     @State var path = Path()
     @State var lastDrawingPoint: CGPoint?
     @State var isDragging = false
+    @State private var pathPoints: [CGPoint] = []
     
     // MARK: - Selection State
     
@@ -72,6 +73,7 @@ struct OverlayView: View {
     @State var selectedTextIndices: Set<Int> = []
     @State var hoveredTextIndex: Int? = nil
     @State var allSelectableWords: [SelectableWord] = []
+    @State private var lineGroupingThreshold: CGFloat = 8
     
     // MARK: - Handle Selection State
     
@@ -116,6 +118,7 @@ struct OverlayView: View {
     
     private let androidStrokeWidth: CGFloat = 6.0
     private let androidStrokeColor = Color.white
+    private var brushSelectionRadius: CGFloat { max(12, androidStrokeWidth * 2.0) }
     
     // MARK: - View Layers
     
@@ -254,11 +257,17 @@ struct OverlayView: View {
                 
                 // Layer 2: Android-style vignette (dark edges, clear center)
                 vignetteOverlay
+                
+                // Layer 3: Selection highlight (blue background behind selected text)
+                selectionHighlightLayer
 
-                // Layer 3: Drawing canvas for scribble
+                // Layer 4: Drawing canvas for scribble
                 drawingCanvasLayer
+                
+                // Layer 5: Selection handles (teardrop handles on top of canvas)
+                selectionHandleLayer
 
-                // Layer 4: Shimmer effect
+                // Layer 6: Shimmer effect
                 LensientMetalView(
                     isPaused: $overlayManager.shouldPauseMetalRendering
                 )
@@ -363,6 +372,7 @@ struct OverlayView: View {
                     isDragging = true
                     path.move(to: value.startLocation)
                     lastDrawingPoint = value.startLocation
+                    pathPoints = [value.startLocation]
                     
                     // Start tracking shimmer at touch point
                     MainActor.assumeIsolated {
@@ -375,6 +385,7 @@ struct OverlayView: View {
                 
                 path.addLine(to: value.location)
                 lastDrawingPoint = value.location
+                pathPoints.append(value.location)
                 
                 // Update shimmer position - Priority 4: Direct call, no Task
                 MainActor.assumeIsolated {
@@ -425,25 +436,37 @@ struct OverlayView: View {
         guard now.timeIntervalSince(lastSelectionUpdateTime) >= selectionUpdateThrottleInterval else { return }
         lastSelectionUpdateTime = now
         
-        guard !drawnPath.isEmpty, !allSelectableWords.isEmpty else {
+        guard !drawnPath.isEmpty, !allSelectableWords.isEmpty, !pathPoints.isEmpty else {
             if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
             if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
             return
         }
 
-        // Priority 2: Use simple boundingRect instead of expensive strokedPath().cgPath.boundingBox
-        let brushBounds = drawnPath.boundingRect.insetBy(dx: -15, dy: -15)
-        
+        let selectionRadius = brushSelectionRadius
+        let brushBounds = boundingRect(for: pathPoints).insetBy(dx: -selectionRadius, dy: -selectionRadius)
+
+        var touchedIndices: [Int] = []
+        for (index, word) in allSelectableWords.enumerated() {
+            guard brushBounds.intersects(word.screenRect) else { continue }
+            let expandedRect = word.screenRect.insetBy(dx: -selectionRadius, dy: -selectionRadius)
+            if pathIntersectsRect(pathPoints, rect: expandedRect) {
+                touchedIndices.append(index)
+            }
+        }
+
+        guard let minIndex = touchedIndices.min(), let maxIndex = touchedIndices.max() else {
+            if !brushedSelectedText.isEmpty { brushedSelectedText = "" }
+            if !activeSelectionWordRects.isEmpty { activeSelectionWordRects = [] }
+            return
+        }
+
         var newBrushedText = ""
         var newWordRects: [CGRect] = []
-        
-        // Priority 1: Iterate precomputed words - NO Vision API calls!
-        for word in allSelectableWords {
-            if brushBounds.intersects(word.screenRect) {
-                if !newBrushedText.isEmpty { newBrushedText.append(" ") }
-                newBrushedText.append(word.text)
-                newWordRects.append(word.screenRect)
-            }
+        for index in minIndex...maxIndex {
+            let word = allSelectableWords[index]
+            if !newBrushedText.isEmpty { newBrushedText.append(" ") }
+            newBrushedText.append(word.text)
+            newWordRects.append(word.screenRect)
         }
         
         if self.brushedSelectedText != newBrushedText {
@@ -510,6 +533,7 @@ struct OverlayView: View {
             
             // Clear brush-specific states
             self.path = Path()
+            self.pathPoints = []
             // activeSelectionWordRects are now stored in currentHandleSelectionRects or were used
             
             log.debug("OverlayView: Confirmed. Handle selection active. Text: '\(self.textForCurrentHandleSelection)'")
@@ -532,6 +556,7 @@ struct OverlayView: View {
     private func resetAllSelectionStates() {
         isDragging = false
         path = Path()
+        pathPoints = []
         brushedSelectedText = ""
         activeSelectionWordRects = []
         isHandleSelectionActive = false
@@ -571,15 +596,118 @@ struct OverlayView: View {
         }
     }
 
-    // Function to draw selection handles
-    private func drawSelectionHandle(at point: CGPoint, context: GraphicsContext) {
-        let handleSize: CGFloat = 12
-        let handlePath = Path(ellipseIn: CGRect(x: point.x - handleSize/2,
-                                              y: point.y - handleSize/2,
-                                              width: handleSize,
-                                              height: handleSize))
-        context.fill(handlePath, with: .color(.blue))
-        context.stroke(handlePath, with: .color(.white), lineWidth: 1)
+    // MARK: - Selection Highlight Layer (Blue Background)
+    
+    /// Renders blue highlight rectangles behind selected words (like Chrome/Safari)
+    private var selectionHighlightLayer: some View {
+        Canvas { context, size in
+            // Use system accent color with transparency for selection highlight
+            let highlightColor = Color.accentColor.opacity(0.35)
+            
+            // Choose the correct source of rects based on selection mode
+            let rectsToHighlight = isHandleSelectionActive 
+                ? currentHandleSelectionRects 
+                : activeSelectionWordRects
+            
+            guard !rectsToHighlight.isEmpty else { return }
+            
+            for rect in rectsToHighlight {
+                // Slightly expand rect for visual polish
+                let expandedRect = rect.insetBy(dx: -2, dy: -1)
+                let roundedPath = Path(roundedRect: expandedRect, cornerRadius: 3)
+                context.fill(roundedPath, with: .color(highlightColor))
+            }
+        }
+        .edgesIgnoringSafeArea(.all)
+        .allowsHitTesting(false)
+    }
+    
+    // MARK: - Teardrop Handle Shape
+    
+    /// Creates a teardrop-shaped selection handle path (like native macOS/iOS selection)
+    /// - Parameters:
+    ///   - point: The anchor point where the handle connects to the text
+    ///   - isStart: If true, teardrop points up (start handle); otherwise points down (end handle)
+    private func teardropHandlePath(at point: CGPoint, isStart: Bool) -> Path {
+        var path = Path()
+        let handleHeight: CGFloat = 20
+        let circleRadius: CGFloat = 5
+        let stemWidth: CGFloat = 2.5
+        
+        if isStart {
+            // Start handle: stem goes UP from anchor, circle at TOP
+            // Anchor point is at bottom of stem (left edge of first word, at baseline)
+            let stemTop = point.y - handleHeight + circleRadius
+            let circleCenter = CGPoint(x: point.x, y: stemTop)
+            
+            // Circle at top
+            path.addEllipse(in: CGRect(
+                x: circleCenter.x - circleRadius,
+                y: circleCenter.y - circleRadius,
+                width: circleRadius * 2,
+                height: circleRadius * 2
+            ))
+            
+            // Stem from circle bottom to anchor point
+            path.addRect(CGRect(
+                x: point.x - stemWidth / 2,
+                y: circleCenter.y,
+                width: stemWidth,
+                height: point.y - circleCenter.y
+            ))
+        } else {
+            // End handle: stem goes DOWN from anchor, circle at BOTTOM
+            // Anchor point is at top of stem (right edge of last word, at top)
+            let stemBottom = point.y + handleHeight - circleRadius
+            let circleCenter = CGPoint(x: point.x, y: stemBottom)
+            
+            // Stem from anchor point down to circle
+            path.addRect(CGRect(
+                x: point.x - stemWidth / 2,
+                y: point.y,
+                width: stemWidth,
+                height: circleCenter.y - point.y
+            ))
+            
+            // Circle at bottom
+            path.addEllipse(in: CGRect(
+                x: circleCenter.x - circleRadius,
+                y: circleCenter.y - circleRadius,
+                width: circleRadius * 2,
+                height: circleRadius * 2
+            ))
+        }
+        
+        return path
+    }
+    
+    // MARK: - Selection Handle Layer
+    
+    /// Renders teardrop selection handles at the start and end of selection
+    private var selectionHandleLayer: some View {
+        Canvas { context, size in
+            guard isHandleSelectionActive else { return }
+            
+            let handleColor = Color.accentColor
+            
+            // Start handle: left edge of first selected word, pointing up
+            if let startRect = currentSelectionStartHandleRect {
+                // Anchor at bottom-left of first word
+                let startAnchor = CGPoint(x: startRect.minX, y: startRect.maxY)
+                let startPath = teardropHandlePath(at: startAnchor, isStart: true)
+                context.fill(startPath, with: .color(handleColor))
+            }
+            
+            // End handle: right edge of last selected word, pointing down
+            if let endRect = currentSelectionEndHandleRect {
+                // Anchor at top-right of last word
+                let endAnchor = CGPoint(x: endRect.maxX, y: endRect.minY)
+                let endPath = teardropHandlePath(at: endAnchor, isStart: false)
+                context.fill(endPath, with: .color(handleColor))
+            }
+        }
+        .edgesIgnoringSafeArea(.all)
+        .allowsHitTesting(false)
     }
     
     // MARK: - Helpers
@@ -588,6 +716,84 @@ struct OverlayView: View {
         let dx = p2.x - p1.x
         let dy = p2.y - p1.y
         return sqrt(dx * dx + dy * dy)
+    }
+
+    private func boundingRect(for points: [CGPoint]) -> CGRect {
+        guard let firstPoint = points.first else { return .null }
+        var minX = firstPoint.x
+        var maxX = firstPoint.x
+        var minY = firstPoint.y
+        var maxY = firstPoint.y
+
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func pathIntersectsRect(_ points: [CGPoint], rect: CGRect) -> Bool {
+        guard points.count > 1 else {
+            if let point = points.first { return rect.contains(point) }
+            return false
+        }
+
+        for index in 0..<(points.count - 1) {
+            let start = points[index]
+            let end = points[index + 1]
+            if segmentIntersectsRect(start, end, rect: rect) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func segmentIntersectsRect(_ start: CGPoint, _ end: CGPoint, rect: CGRect) -> Bool {
+        if rect.contains(start) || rect.contains(end) { return true }
+
+        let topLeft = CGPoint(x: rect.minX, y: rect.minY)
+        let topRight = CGPoint(x: rect.maxX, y: rect.minY)
+        let bottomRight = CGPoint(x: rect.maxX, y: rect.maxY)
+        let bottomLeft = CGPoint(x: rect.minX, y: rect.maxY)
+
+        let epsilon: CGFloat = 0.0001
+        return segmentsIntersect(start, end, topLeft, topRight, epsilon: epsilon)
+            || segmentsIntersect(start, end, topRight, bottomRight, epsilon: epsilon)
+            || segmentsIntersect(start, end, bottomRight, bottomLeft, epsilon: epsilon)
+            || segmentsIntersect(start, end, bottomLeft, topLeft, epsilon: epsilon)
+    }
+
+    private func segmentsIntersect(_ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint, _ p4: CGPoint, epsilon: CGFloat) -> Bool {
+        let d1 = cross(p3, p4, p1)
+        let d2 = cross(p3, p4, p2)
+        let d3 = cross(p1, p2, p3)
+        let d4 = cross(p1, p2, p4)
+
+        if ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)) {
+            return true
+        }
+
+        if abs(d1) <= epsilon && onSegment(p3, p4, p1, epsilon: epsilon) { return true }
+        if abs(d2) <= epsilon && onSegment(p3, p4, p2, epsilon: epsilon) { return true }
+        if abs(d3) <= epsilon && onSegment(p1, p2, p3, epsilon: epsilon) { return true }
+        if abs(d4) <= epsilon && onSegment(p1, p2, p4, epsilon: epsilon) { return true }
+
+        return false
+    }
+
+    private func cross(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat {
+        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    }
+
+    private func onSegment(_ a: CGPoint, _ b: CGPoint, _ p: CGPoint, epsilon: CGFloat) -> Bool {
+        let minX = min(a.x, b.x) - epsilon
+        let maxX = max(a.x, b.x) + epsilon
+        let minY = min(a.y, b.y) - epsilon
+        let maxY = max(a.y, b.y) + epsilon
+        return p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY
     }
     
     // Handle drag gesture for selection handles
@@ -658,14 +864,27 @@ struct OverlayView: View {
 
         var closestWordGlobalIndexToDragLocation: Int? = nil
         var minDistSqToDragLocation: CGFloat = .greatestFiniteMagnitude
+        var minHorizontalDistance: CGFloat = .greatestFiniteMagnitude
 
-        // Find the word whose center is closest to the current drag location
         for word in allSelectableWords {
-            let wordCenter = CGPoint(x: word.screenRect.midX, y: word.screenRect.midY)
-            let distSq = pow(wordCenter.x - newLocation.x, 2) + pow(wordCenter.y - newLocation.y, 2)
-            if distSq < minDistSqToDragLocation {
-                minDistSqToDragLocation = distSq
-                closestWordGlobalIndexToDragLocation = word.globalIndex
+            let verticalDistance = abs(word.screenRect.midY - newLocation.y)
+            if verticalDistance <= lineGroupingThreshold {
+                let horizontalDistance = abs(word.screenRect.midX - newLocation.x)
+                if horizontalDistance < minHorizontalDistance {
+                    minHorizontalDistance = horizontalDistance
+                    closestWordGlobalIndexToDragLocation = word.globalIndex
+                }
+            }
+        }
+
+        if closestWordGlobalIndexToDragLocation == nil {
+            for word in allSelectableWords {
+                let wordCenter = CGPoint(x: word.screenRect.midX, y: word.screenRect.midY)
+                let distSq = pow(wordCenter.x - newLocation.x, 2) + pow(wordCenter.y - newLocation.y, 2)
+                if distSq < minDistSqToDragLocation {
+                    minDistSqToDragLocation = distSq
+                    closestWordGlobalIndexToDragLocation = word.globalIndex
+                }
             }
         }
         
@@ -801,10 +1020,12 @@ struct OverlayView: View {
         let regions = overlayManager.detailedTextRegions
         guard canvasProxySize.width > 0, canvasProxySize.height > 0 else {
             self.allSelectableWords = []
+            self.lineGroupingThreshold = 8
             return
         }
         guard !regions.isEmpty else {
             self.allSelectableWords = []
+            self.lineGroupingThreshold = 8
             return
         }
 
@@ -844,8 +1065,61 @@ struct OverlayView: View {
                 }
             }
         }
-        self.allSelectableWords = tempSelectableWords
+        self.allSelectableWords = orderSelectableWords(tempSelectableWords)
+        self.hoveredTextIndex = nil
         // print("Processed \(self.allSelectableWords.count) selectable words.")
+    }
+
+    private func orderSelectableWords(_ words: [SelectableWord]) -> [SelectableWord] {
+        guard !words.isEmpty else { return [] }
+
+        let sortedHeights = words.map { $0.screenRect.height }.sorted()
+        let medianHeight = sortedHeights[sortedHeights.count / 2]
+        let groupingThreshold = max(4, medianHeight * 0.6)
+        lineGroupingThreshold = groupingThreshold
+
+        let sortedByY = words.sorted { $0.screenRect.minY < $1.screenRect.minY }
+        var lines: [[SelectableWord]] = []
+        var currentLine: [SelectableWord] = []
+        var currentLineMidY: CGFloat = 0
+
+        for word in sortedByY {
+            let midY = word.screenRect.midY
+            if currentLine.isEmpty {
+                currentLine = [word]
+                currentLineMidY = midY
+                continue
+            }
+
+            if abs(midY - currentLineMidY) <= groupingThreshold {
+                currentLine.append(word)
+                let count = CGFloat(currentLine.count)
+                currentLineMidY = (currentLineMidY * (count - 1) + midY) / count
+            } else {
+                lines.append(currentLine)
+                currentLine = [word]
+                currentLineMidY = midY
+            }
+        }
+
+        if !currentLine.isEmpty {
+            lines.append(currentLine)
+        }
+
+        let orderedWords = lines.flatMap { line in
+            line.sorted { $0.screenRect.minX < $1.screenRect.minX }
+        }
+
+        return orderedWords.enumerated().map { index, word in
+            SelectableWord(
+                text: word.text,
+                screenRect: word.screenRect,
+                normalizedRect: word.normalizedRect,
+                globalIndex: index,
+                sourceRegionIndex: word.sourceRegionIndex,
+                sourceWordSwiftRange: word.sourceWordSwiftRange
+            )
+        }
     }
 }
 
