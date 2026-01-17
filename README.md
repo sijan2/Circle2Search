@@ -1,12 +1,21 @@
-# Circle2Search
-Circle to Search for macOS.
+# Circle2Search 
+Android Circle to Search for macOS.
 
 
 
-https://github.com/user-attachments/assets/5f95b02b-db1b-4c4d-8a8a-1c8ed3824629
+
+
+
+
+
+
+https://github.com/user-attachments/assets/57aff6e6-ba49-4192-a293-e54fdfa111ef
+
+
+
 
 
 
 ---
 
-*This is a work in progress. Feedback welcome!*
+*This is a work in progress. Feedback and contribution are welcome!*
