@@ -12,6 +12,7 @@ class OverlayManager: ObservableObject {
     @Published var isWindowActuallyVisible = true
     @Published var shouldPauseMetalRendering: Bool = false
     @Published var detailedTextRegions: [DetailedTextRegion] = [] // Published for async OCR updates
+    @Published var detectedBarcodes: [DetectableBarcode] = [] // Published for async barcode detection
     @Published var isResultPanelVisible: Bool = false  // Track if result panel popover is open
     
     /// Set to true when popover closes via user click. First tap after close clears this flag,
@@ -33,6 +34,7 @@ class OverlayManager: ObservableObject {
 
         currentCompletion = completion
         self.detailedTextRegions = [] // Clear previous regions
+        self.detectedBarcodes = [] // Clear previous barcodes
         self.previousActiveApp = previousApp
 
         // Get screen details
@@ -261,6 +263,7 @@ class OverlayManager: ObservableObject {
              self.overlayContentView = nil // Clear content view reference
              self.currentCompletion = nil // Clear completion handler
              self.detailedTextRegions = [] // Clear regions
+             self.detectedBarcodes = [] // Clear barcodes
              self.isOverlayVisible = false // Ensure state reflects reality
              self.isWindowActuallyVisible = false // Ensure visibility state is also reset
             //  self.shouldPauseMetalRendering = true // Pause rendering when overlay is cleaned up

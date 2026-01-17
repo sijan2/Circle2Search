@@ -19,6 +19,7 @@ final class CaptureController: NSObject, ObservableObject {
     var previousApp: NSRunningApplication?
     private var currentBackgroundImage: CGImage?
     private var currentDetailedTextRegions: [DetailedTextRegion] = []
+    private var currentDetectedBarcodes: [DetectableBarcode] = []
 
     // MARK: - Capture Initiation
 
@@ -93,6 +94,11 @@ final class CaptureController: NSObject, ObservableObject {
         // Run OCR in background
         Task.detached(priority: .userInitiated) { [weak self, cgImage] in
             await self?.detectInitialTextRegions(image: cgImage)
+        }
+        
+        // Run barcode detection in parallel (lower priority)
+        Task.detached(priority: .utility) { [weak self, cgImage] in
+            await self?.detectBarcodes(image: cgImage)
         }
     }
 
@@ -232,6 +238,41 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     // MARK: - Vision Analysis
+
+    /// Performs barcode and QR code detection on the full image.
+    private func detectBarcodes(image: CGImage) async {
+        log.debug("Starting barcode detection (background)...")
+        
+        let request = VNDetectBarcodesRequest { [weak self] request, error in
+            guard let strongSelf = self else { return }
+            
+            guard let observations = request.results as? [VNBarcodeObservation], error == nil else {
+                log.debug("Barcode detection: no results or error: \(error?.localizedDescription ?? "unknown")")
+                return
+            }
+            
+            let screenSize = NSScreen.main?.frame.size ?? .zero
+            let barcodes = observations.map { DetectableBarcode(from: $0, screenSize: screenSize) }
+            
+            strongSelf.currentDetectedBarcodes = barcodes
+            
+            Task { @MainActor in
+                OverlayManager.shared.detectedBarcodes = barcodes
+                log.info("Barcode detection complete: \(barcodes.count) found")
+            }
+        }
+        
+        // Limit to common symbologies for performance
+        request.symbologies = [.qr, .microQR, .ean13, .ean8, .code128, .code39, .dataMatrix, .pdf417, .aztec]
+        
+        let requestHandler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try requestHandler.perform([request])
+            log.debug("VNImageRequestHandler perform complete for barcode detection.")
+        } catch {
+            log.error("Failed to perform barcode detection: \(error)")
+        }
+    }
 
     /// Performs initial, fast detection of text regions on the full image.
     private func detectInitialTextRegions(image: CGImage) async {

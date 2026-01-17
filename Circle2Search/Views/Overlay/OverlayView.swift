@@ -98,6 +98,11 @@ struct OverlayView: View {
     @State private var glowOpacity: Double = 0.0
     @State private var glowScale: CGFloat = 1.0
     @State private var drawingAnimation: Animation?
+    
+    // MARK: - Barcode UX State
+    
+    @State private var copiedBarcodeIds: Set<UUID> = []  // Track which barcodes show "copied" feedback
+    @State private var hoveredBarcodeId: UUID? = nil      // Track hover state for QR box
     @State var rippleOrigin: CGPoint = .zero
     @State var rippleTrigger: Int = 0
     
@@ -273,6 +278,9 @@ struct OverlayView: View {
                 )
                 .edgesIgnoringSafeArea(.all)
                 .allowsHitTesting(false)
+                
+                // Layer 7: Barcode overlay indicators (MUST be above shimmer for visibility and tapping)
+                barcodeOverlayLayer
             }
             .onAppear {
                 screenCenter = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
@@ -595,7 +603,318 @@ struct OverlayView: View {
             hoveredTextIndex = nil
         }
     }
-
+    
+    // MARK: - Barcode Overlay Layer
+    
+    /// Renders barcode highlights with Android-style action chips
+    /// - Chip tap: Copies to clipboard + shows checkmark feedback
+    /// - Box tap: Opens action (URL/phone/etc) + dismisses overlay
+    private var barcodeOverlayLayer: some View {
+        ForEach(overlayManager.detectedBarcodes) { barcode in
+            VStack(spacing: 8) {
+                // Barcode highlight rectangle - TAP TO OPEN AND DISMISS
+                ZStack {
+                    // Translucent background fill
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(barcodeAccentColor(for: barcode).opacity(hoveredBarcodeId == barcode.id ? 0.3 : 0.15))
+                    
+                    // Border stroke
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(barcodeAccentColor(for: barcode), lineWidth: hoveredBarcodeId == barcode.id ? 3.5 : 2.5)
+                    
+                    // Hover hint - "Click to open" indicator
+                    if hoveredBarcodeId == barcode.id {
+                        VStack(spacing: 4) {
+                            Image(systemName: "arrow.up.forward.square")
+                                .font(.system(size: 20, weight: .medium))
+                            Text("Click to open")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(barcodeAccentColor(for: barcode))
+                        .opacity(0.8)
+                    }
+                }
+                .frame(width: barcode.screenRect.width + 12, height: barcode.screenRect.height + 12)
+                .contentShape(Rectangle())
+                .onHover { isHovering in
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        hoveredBarcodeId = isHovering ? barcode.id : nil
+                    }
+                }
+                .onTapGesture {
+                    // Box tap: OPEN and DISMISS
+                    openAndDismiss(barcode: barcode)
+                }
+                
+                // Action chip - TAP TO COPY
+                actionChip(for: barcode)
+            }
+            .position(
+                x: barcode.screenRect.midX,
+                y: barcode.screenRect.midY + 20
+            )
+        }
+        .edgesIgnoringSafeArea(.all)
+    }
+    
+    /// Action chip view - shows checkmark when copied
+    private func actionChip(for barcode: DetectableBarcode) -> some View {
+        let isCopied = copiedBarcodeIds.contains(barcode.id)
+        
+        return HStack(spacing: 6) {
+            // Icon: checkmark if copied, otherwise content type icon
+            Image(systemName: isCopied ? "checkmark" : barcode.contentType.icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+                .contentTransition(.symbolEffect(.replace))
+            
+            // Label: "Copied!" if copied, otherwise action label
+            Text(isCopied ? "Copied!" : chipLabel(for: barcode))
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundColor(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            Capsule()
+                .fill(isCopied ? Color.green : barcodeAccentColor(for: barcode))
+                .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
+        )
+        .scaleEffect(isCopied ? 1.05 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isCopied)
+        .onTapGesture {
+            // Chip tap: COPY to clipboard
+            copyToClipboard(barcode: barcode)
+        }
+    }
+    
+    /// Get accent color based on barcode content type
+    private func barcodeAccentColor(for barcode: DetectableBarcode) -> Color {
+        switch barcode.contentType {
+        case .url: return .blue
+        case .wifi: return Color(red: 0.2, green: 0.7, blue: 0.4)
+        case .phone, .sms: return .green
+        case .email: return .blue
+        case .contact: return .orange
+        case .location: return .red
+        case .event: return .purple
+        case .product: return .gray
+        default: return Color(red: 0.2, green: 0.7, blue: 0.4)
+        }
+    }
+    
+    /// Get descriptive chip label
+    private func chipLabel(for barcode: DetectableBarcode) -> String {
+        let payload = barcode.parsedPayload
+        
+        switch barcode.contentType {
+        case .wifi:
+            if let ssid = payload.wifiSSID {
+                return "Copy \"\(ssid)\" password"
+            }
+            return "Copy password"
+        case .url:
+            if let urlStr = barcode.payloadString, let url = URL(string: urlStr), let host = url.host {
+                let trimmed = host.replacingOccurrences(of: "www.", with: "")
+                return trimmed.count > 18 ? String(trimmed.prefix(18)) + "…" : trimmed
+            }
+            return "Copy link"
+        case .phone:
+            if let phone = payload.phoneNumber {
+                return phone.count > 15 ? String(phone.prefix(15)) + "…" : phone
+            }
+            return "Copy number"
+        case .email:
+            if let email = payload.emailAddress {
+                let short = email.count > 18 ? String(email.prefix(15)) + "…" : email
+                return short
+            }
+            return "Copy email"
+        case .contact:
+            if let name = payload.contactName {
+                return name.count > 18 ? String(name.prefix(15)) + "…" : name
+            }
+            return "Copy contact"
+        case .location:
+            return "Copy location"
+        case .product:
+            return barcode.payloadString ?? "Copy barcode"
+        default:
+            return "Copy"
+        }
+    }
+    
+    // MARK: - Barcode Actions
+    
+    /// Copy barcode content to clipboard and show checkmark feedback
+    private func copyToClipboard(barcode: DetectableBarcode) {
+        let payload = barcode.parsedPayload
+        var textToCopy: String = barcode.payloadString ?? ""
+        
+        // Get the most useful text to copy based on content type
+        switch barcode.contentType {
+        case .wifi:
+            textToCopy = payload.wifiPassword ?? payload.wifiSSID ?? textToCopy
+        case .url:
+            textToCopy = payload.urlString ?? textToCopy
+        case .phone:
+            textToCopy = payload.phoneNumber ?? textToCopy
+        case .email:
+            textToCopy = payload.emailAddress ?? textToCopy
+        case .contact:
+            var parts: [String] = []
+            if let name = payload.contactName { parts.append(name) }
+            if let phone = payload.contactPhone { parts.append(phone) }
+            if let email = payload.contactEmail { parts.append(email) }
+            textToCopy = parts.joined(separator: "\n")
+        case .location:
+            if let lat = payload.latitude, let lng = payload.longitude {
+                textToCopy = "\(lat), \(lng)"
+            }
+        default:
+            break
+        }
+        
+        // Copy to clipboard
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(textToCopy, forType: .string)
+        log.info("Copied to clipboard: \(textToCopy)")
+        
+        // Show checkmark animation
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+            copiedBarcodeIds.insert(barcode.id)
+        }
+        
+        // Reset after 2 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            withAnimation(.easeOut(duration: 0.3)) {
+                _ = self.copiedBarcodeIds.remove(barcode.id)
+            }
+        }
+    }
+    
+    /// Open barcode action and dismiss overlay using native macOS APIs
+    private func openAndDismiss(barcode: DetectableBarcode) {
+        log.info("Opening barcode action and dismissing: \(barcode.contentType)")
+        
+        let payload = barcode.parsedPayload
+        let handler = BarcodeIntentHandler.shared
+        
+        // Dismiss helper
+        func dismiss() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.showOverlay = false
+                OverlayManager.shared.dismissOverlay()
+            }
+        }
+        
+        switch barcode.contentType {
+        case .url:
+            let urlStr = payload.urlString ?? barcode.payloadString ?? ""
+            handler.openURL(urlStr) { success in
+                if success { dismiss() }
+            }
+            
+        case .wifi:
+            // Copy password and optionally open WiFi settings
+            handler.handleWiFi(
+                ssid: payload.wifiSSID ?? "",
+                password: payload.wifiPassword,
+                encryption: payload.wifiEncryption,
+                hidden: payload.wifiHidden
+            ) { success, message in
+                log.info("WiFi: \(message)")
+                // For WiFi, also open system preferences
+                handler.openWiFiSettings()
+                dismiss()
+            }
+            
+        case .phone:
+            let number = payload.phoneNumber ?? barcode.payloadString ?? ""
+            handler.callPhone(number) { success in
+                if success { dismiss() }
+            }
+            
+        case .sms:
+            if let phone = payload.phoneNumber {
+                handler.sendSMS(to: phone, message: payload.smsMessage) { success in
+                    if success { dismiss() }
+                }
+            }
+            
+        case .email:
+            if let email = payload.emailAddress {
+                handler.sendEmail(
+                    to: email,
+                    subject: payload.emailSubject,
+                    body: payload.emailBody
+                ) { success in
+                    if success { dismiss() }
+                }
+            }
+            
+        case .contact:
+            // Use native Contacts API
+            handler.addContact(
+                name: payload.contactName,
+                phone: payload.contactPhone,
+                email: payload.contactEmail,
+                organization: payload.contactOrganization
+            ) { success, message in
+                log.info("Contact: \(message)")
+                dismiss()
+            }
+            
+        case .event:
+            // Use native Calendar API
+            handler.addCalendarEvent(
+                title: payload.eventTitle,
+                location: payload.eventLocation,
+                startDate: payload.eventStartDate,
+                endDate: payload.eventEndDate
+            ) { success, message in
+                log.info("Event: \(message)")
+                dismiss()
+            }
+            
+        case .location:
+            if let lat = payload.latitude, let lng = payload.longitude {
+                handler.openLocation(
+                    latitude: lat,
+                    longitude: lng,
+                    label: payload.locationLabel
+                ) { success in
+                    if success { dismiss() }
+                }
+            }
+            
+        case .product:
+            if let code = barcode.payloadString {
+                handler.searchProduct(code) { success in
+                    if success { dismiss() }
+                }
+            }
+            
+        default:
+            // For unknown types, search Google
+            if let text = barcode.payloadString {
+                if let url = URL(string: text), url.scheme != nil {
+                    handler.openURL(text) { _ in dismiss() }
+                } else {
+                    handler.searchGoogle(text) { _ in dismiss() }
+                }
+            }
+        }
+    }
+    
+    /// Show success visual effect (legacy, kept for compatibility)
+    private func showSuccessEffect() {
+        MainActor.assumeIsolated {
+            LensientEffectsController.shared.showAmbient()
+        }
+    }
+    
     // MARK: - Selection Highlight Layer (Blue Background)
     
     /// Renders blue highlight rectangles behind selected words (like Chrome/Safari)

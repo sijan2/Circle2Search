@@ -3,6 +3,7 @@ android-circle/
 android_models/
 # Native Android libraries
 native_libs/
+vision_api_docs/
 
 # Circle2Search analysis/documentation
 *_ANALYSIS.md
