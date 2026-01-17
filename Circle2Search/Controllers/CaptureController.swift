@@ -300,6 +300,15 @@ final class CaptureController: NSObject, ObservableObject {
                 Task { @MainActor in
                     OverlayManager.shared.detailedTextRegions = newDetailedRegions
                     log.info("OCR complete: \(newDetailedRegions.count) regions found")
+                    
+                    // Run data detection for URLs, emails, phones (low priority)
+                    if !newDetailedRegions.isEmpty {
+                        let detectedData = TextDataDetector.shared.extractDataFromRegions(newDetailedRegions)
+                        OverlayManager.shared.detectedTextData = detectedData
+                        if !detectedData.isEmpty {
+                            log.info("Data detection: found \(detectedData.count) regions with URLs/emails/phones")
+                        }
+                    }
                 }
             } else {
                 strongSelf.currentDetailedTextRegions = []
@@ -310,6 +319,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
         request.recognitionLevel = VNRequestTextRecognitionLevel.fast
         request.usesLanguageCorrection = false
+        request.automaticallyDetectsLanguage = true  // Auto-detect language for multi-language support
 
         let requestHandler = VNImageRequestHandler(cgImage: image, options: [:])
         do {
@@ -370,6 +380,8 @@ final class CaptureController: NSObject, ObservableObject {
         }
         
         request.recognitionLevel = VNRequestTextRecognitionLevel.accurate
+        request.usesLanguageCorrection = true              // Enable language correction for accuracy
+        request.automaticallyDetectsLanguage = true        // Auto-detect language for multi-language support
         
         let handler = VNImageRequestHandler(cgImage: croppedImage, options: [:])
         do {
@@ -381,6 +393,55 @@ final class CaptureController: NSObject, ObservableObject {
                 ResultPanel.shared.presentGoogleQuery("Error processing image for text recognition.")
                  // OverlayManager.shared.dismissOverlay() // <-- REMOVED: Do not dismiss
                  // self?.activatePreviousApp() // <-- REMOVED: Do not activate previous app
+            }
+        }
+    }
+    
+    /// Performs focused text recognition using regionOfInterest for better accuracy on brush selections
+    /// - Parameters:
+    ///   - image: The full captured image
+    ///   - normalizedRect: The region to focus on in normalized coordinates (0-1, origin at bottom-left)
+    /// - Returns: Array of recognized text observations within the region
+    private func recognizeTextInRegion(image: CGImage, normalizedRect: CGRect) async -> [VNRecognizedTextObservation] {
+        log.debug("Performing focused OCR in region: \(normalizedRect)")
+        
+        // Ensure valid region
+        let clampedRect = CGRect(
+            x: max(0, min(1, normalizedRect.origin.x)),
+            y: max(0, min(1, normalizedRect.origin.y)),
+            width: min(1 - normalizedRect.origin.x, normalizedRect.width),
+            height: min(1 - normalizedRect.origin.y, normalizedRect.height)
+        )
+        
+        guard clampedRect.width > 0.01, clampedRect.height > 0.01 else {
+            log.debug("Region too small for focused OCR, returning empty")
+            return []
+        }
+        
+        return await withCheckedContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, error in
+                guard let observations = request.results as? [VNRecognizedTextObservation], error == nil else {
+                    log.debug("Focused OCR failed: \(error?.localizedDescription ?? "unknown")")
+                    continuation.resume(returning: [])
+                    return
+                }
+                continuation.resume(returning: observations)
+            }
+            
+            // Use accurate recognition for focused regions
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.automaticallyDetectsLanguage = true
+            
+            // KEY: Focus recognition on the brush selection area
+            request.regionOfInterest = clampedRect
+            
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                log.error("Focused OCR handler failed: \(error)")
+                continuation.resume(returning: [])
             }
         }
     }

@@ -13,6 +13,7 @@ class OverlayManager: ObservableObject {
     @Published var shouldPauseMetalRendering: Bool = false
     @Published var detailedTextRegions: [DetailedTextRegion] = [] // Published for async OCR updates
     @Published var detectedBarcodes: [DetectableBarcode] = [] // Published for async barcode detection
+    @Published var detectedTextData: [DetectedTextData] = [] // Auto-detected URLs, emails, phones in text
     @Published var isResultPanelVisible: Bool = false  // Track if result panel popover is open
     
     /// Set to true when popover closes via user click. First tap after close clears this flag,

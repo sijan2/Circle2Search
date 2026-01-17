@@ -112,6 +112,13 @@ struct ParsedBarcodePayload: Equatable {
     
     // URL
     var urlString: String?
+    
+    // GS1 Product Data (from GS1 DataBar barcodes)
+    var gtin: String?                    // Global Trade Item Number (AI 01)
+    var gs1BatchNumber: String?          // Batch/Lot number (AI 10)
+    var gs1ExpirationDate: String?       // Expiration date (AI 17)
+    var gs1SerialNumber: String?         // Serial number (AI 21)
+    var gs1ApplicationIdentifiers: [String: String]? // All parsed AIs
 }
 
 // MARK: - Detectable Barcode
@@ -124,6 +131,11 @@ struct DetectableBarcode: Identifiable, Equatable {
     let payloadData: Data?
     let normalizedRect: CGRect
     var screenRect: CGRect
+    
+    // GS1/Advanced barcode properties from Vision API
+    let isGS1DataCarrier: Bool          // Contains GS1 product data (AI codes)
+    let isColorInverted: Bool           // Barcode colors are inverted
+    let supplementalPayload: String?    // Supplemental code (ISBN/UPC add-ons)
     
     /// Detected content type (computed from payload)
     var contentType: BarcodeContentType {
@@ -140,11 +152,21 @@ struct DetectableBarcode: Identifiable, Equatable {
         symbology == .qr || symbology == .microQR
     }
     
+    /// Whether this is a GS1 product barcode with rich data
+    var hasGS1Data: Bool {
+        isGS1DataCarrier && parsedPayload.gs1ApplicationIdentifiers != nil
+    }
+    
     init(from observation: VNBarcodeObservation, screenSize: CGSize) {
         self.symbology = observation.symbology
         self.payloadString = observation.payloadStringValue
         self.payloadData = observation.barcodeDescriptor != nil ? nil : nil
         self.normalizedRect = observation.boundingBox
+        
+        // GS1 and advanced properties
+        self.isGS1DataCarrier = observation.isGS1DataCarrier
+        self.isColorInverted = observation.isColorInverted
+        self.supplementalPayload = observation.supplementalPayloadString
         
         // Convert normalized Vision coordinates to screen coordinates
         self.screenRect = CGRect(
@@ -265,6 +287,11 @@ struct DetectableBarcode: Identifiable, Equatable {
         var payload = ParsedBarcodePayload()
         guard let raw = payloadString else { return payload }
         
+        // Parse GS1 data if available (for product barcodes)
+        if isGS1DataCarrier {
+            parseGS1Data(raw, into: &payload)
+        }
+        
         switch contentType {
         case .wifi:
             parseWiFi(raw, into: &payload)
@@ -282,6 +309,11 @@ struct DetectableBarcode: Identifiable, Equatable {
             parseContact(raw, into: &payload)
         case .event:
             parseEvent(raw, into: &payload)
+        case .product:
+            // For product barcodes, extract GTIN if not already from GS1
+            if payload.gtin == nil {
+                payload.gtin = raw
+            }
         default:
             break
         }
@@ -419,6 +451,93 @@ struct DetectableBarcode: Identifiable, Equatable {
                 payload.eventLocation = String(trimmed.dropFirst(9))
             }
             // Date parsing would require more complex iCal date handling
+        }
+    }
+    
+    /// Parse GS1 Application Identifiers from barcode data
+    /// Common AIs: 01 (GTIN), 10 (Batch), 17 (Expiration), 21 (Serial)
+    private func parseGS1Data(_ raw: String, into payload: inout ParsedBarcodePayload) {
+        var ais: [String: String] = [:]
+        var index = raw.startIndex
+        
+        // GS1 AI format: (AI)Value or AI Value (with FNC1 separators represented as GS char \u{001D})
+        // Common fixed-length AIs don't need separators
+        
+        while index < raw.endIndex {
+            // Try to match AI patterns
+            let remaining = String(raw[index...])
+            
+            // Check for bracketed AI format: (01)12345678901234
+            if remaining.hasPrefix("(") {
+                if let closeIdx = remaining.firstIndex(of: ")") {
+                    let ai = String(remaining[remaining.index(after: remaining.startIndex)..<closeIdx])
+                    let afterClose = remaining.index(after: closeIdx)
+                    
+                    // Find next AI or end
+                    let valueEndIdx = remaining[afterClose...].firstIndex(of: "(") ?? remaining.endIndex
+                    let value = String(remaining[afterClose..<valueEndIdx]).trimmingCharacters(in: .whitespaces)
+                    
+                    ais[ai] = value
+                    index = raw.index(index, offsetBy: remaining.distance(from: remaining.startIndex, to: valueEndIdx))
+                    continue
+                }
+            }
+            
+            // Check for common fixed-length AIs without brackets
+            // AI 01: GTIN-14 (14 digits)
+            if remaining.count >= 16, remaining.hasPrefix("01") {
+                let value = String(remaining.dropFirst(2).prefix(14))
+                if value.allSatisfy({ $0.isNumber }) {
+                    ais["01"] = value
+                    index = raw.index(index, offsetBy: 16)
+                    continue
+                }
+            }
+            
+            // AI 10: Batch/Lot (variable, up to 20 chars, terminated by GS or end)
+            if remaining.count >= 3, remaining.hasPrefix("10") {
+                var value = String(remaining.dropFirst(2))
+                if let gsIdx = value.firstIndex(of: "\u{001D}") {
+                    value = String(value[..<gsIdx])
+                }
+                value = String(value.prefix(20))
+                ais["10"] = value
+                index = raw.index(index, offsetBy: 2 + value.count)
+                continue
+            }
+            
+            // AI 17: Expiration date (6 digits YYMMDD)
+            if remaining.count >= 8, remaining.hasPrefix("17") {
+                let value = String(remaining.dropFirst(2).prefix(6))
+                if value.allSatisfy({ $0.isNumber }) {
+                    ais["17"] = value
+                    index = raw.index(index, offsetBy: 8)
+                    continue
+                }
+            }
+            
+            // AI 21: Serial number (variable, up to 20 chars)
+            if remaining.count >= 3, remaining.hasPrefix("21") {
+                var value = String(remaining.dropFirst(2))
+                if let gsIdx = value.firstIndex(of: "\u{001D}") {
+                    value = String(value[..<gsIdx])
+                }
+                value = String(value.prefix(20))
+                ais["21"] = value
+                index = raw.index(index, offsetBy: 2 + value.count)
+                continue
+            }
+            
+            // Move forward if no match
+            index = raw.index(after: index)
+        }
+        
+        if !ais.isEmpty {
+            payload.gs1ApplicationIdentifiers = ais
+            payload.gtin = ais["01"]
+            payload.gs1BatchNumber = ais["10"]
+            payload.gs1ExpirationDate = ais["17"]
+            payload.gs1SerialNumber = ais["21"]
         }
     }
     
